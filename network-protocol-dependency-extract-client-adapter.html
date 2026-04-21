@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network / Protocol Dependency → Extract a Client Adapter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Network / Protocol Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Extract a Client Adapter</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Network / Protocol Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract a Client Adapter</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers discusses network concerns in chapters 14 and 15 as a motivating example — code that talks to a server is hard to test, so wrap it — but doesn't provide a named Chapter 25 technique. The closest cataloged move is <em>Adapt Parameter</em>, which covers it generically. This pairing gives the network-specific shape its own page because the tooling (WireMock, MockWebServer, vendor sandbox environments) and trade-offs (integration vs unit testing) are distinct enough to warrant explicit treatment.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>network / protocol dependency</strong> exists when code speaks directly to a remote system over a protocol — HTTP via <code>HttpClient</code> or <code>OkHttpClient</code>; REST via retrofit-style generated clients; GraphQL via a vendor library; gRPC via generated stubs; raw TCP sockets; JDBC; SMTP; a vendor SDK (AWS, Stripe, Twilio, Slack) that bundles its own HTTP layer. The network call is buried inside the class's methods, with whatever serialization, authentication, retry, and connection-management details the chosen library requires.</p>
+
+<p>Unlike a generic library dependency, network code has a distinctive testing challenge: the collaborator is <em>not present</em> at test time in any reasonable sense. You can't instantiate it (it's a remote service), you can't predict its availability, and you can't easily simulate its failure modes. The classical dependency-breaking techniques all apply, but they apply against a backdrop of <em>"the real thing lives on someone else's server"</em>.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The collaborator isn't in the JVM</h4>
+
+<p>Every other dependency type this site covers is an object in your process. A network dependency is a process somewhere else — or, worse, a business that charges you money every time your test accidentally calls it. Tests need to avoid ever letting the call escape the JVM.</p>
+
+<h4>Real HTTP in tests is slow and flaky</h4>
+
+<p>Even when the remote service is cooperative (a staging environment, a sandbox account), every network round-trip adds latency. Tests that hit real HTTP take seconds each and fail when the network is slow, when DNS is flaky, or when the remote service is briefly down. The feedback loop degrades exactly the way it does with filesystem I/O, just worse.</p>
+
+<h4>Error paths require specific server behavior</h4>
+
+<p>Testing <em>"what happens when the server returns 503?"</em> means getting a real server to return 503. Testing <em>"what happens when the response JSON is malformed?"</em> means a real server that sends malformed JSON. Testing <em>"what happens if the connection drops mid-response?"</em> means a network layer that drops connections. None of these are easy with a live remote.</p>
+
+<h4>Vendor SDK clients are often final or heavy</h4>
+
+<p>AWS SDK's <code>S3Client</code>, Stripe's <code>Stripe</code> static facade, Twilio's <code>RestClient</code> — many of these are final classes or have heavy constructors that set up connection pools, authentication, and protocol state. Your test needs a way around the SDK boundary, either by not touching it at all or by interposing at the HTTP layer beneath it.</p>
+
+<h4>Authentication couples tests to credentials</h4>
+
+<p>A test that creates a real client needs real credentials. Real credentials either live in environment variables (fragile, platform-specific) or in test fixtures (which get accidentally committed). The best tests have no credentials at all, because they never make network calls.</p>
+
+<hr>
+
+<h2>The technique: Extract a Client Adapter</h2>
+
+<p><strong>Extract a Client Adapter</strong> defines a small interface capturing exactly the operations your code performs against the remote service — not <em>"everything the HTTP client can do"</em>, but <em>"the three calls my class actually makes"</em>. The interface uses your domain types, not protocol types. The production implementation owns the real network client and translates between your domain types and the protocol's wire format. Tests implement the interface directly with fakes that return canned domain objects.</p>
+
+<p>This is Adapt Parameter applied deliberately to a network boundary, with one specific discipline: the interface's methods return your domain types, not the protocol library's types. The line between "your code" and "the protocol" runs through the adapter, not through the interface. If the vendor changes its library, the adapter changes; your code and your tests don't.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Code directly uses an HTTP client, a gRPC stub, or a vendor SDK.</li>
+  <li>Tests need deterministic behavior without real network calls.</li>
+  <li>The class under test uses a small number of operations against the remote — a dozen endpoints, not a hundred.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>You want to test the wire-format handling itself (parsing specific response bodies, authentication headers, retry semantics) — use a fake HTTP server like WireMock or MockWebServer instead. These exercise the real client library but with a server under the test's control.</li>
+  <li>The class uses a very wide slice of the remote API — a hundred endpoints — and maintaining an interface with that many methods is itself a cost. Consider splitting the class or accepting that integration tests with a fake server carry more of the weight.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>UserEnricher</code> calls a REST API using <code>HttpClient</code> directly:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">UserEnricher</span> {
+    <span class="kw">private static final</span> <span class="type">String</span> <span class="type">BASE_URL</span> = <span class="str">"https://profile.example.com"</span>;
+    <span class="kw">private final</span> <span class="type">HttpClient</span> http;
+    <span class="kw">private final</span> <span class="type">String</span> apiToken;
+    <span class="kw">private final</span> <span class="type">ObjectMapper</span> json = <span class="kw">new</span> <span class="type">ObjectMapper</span>();
+
+    <span class="kw">public</span> <span class="fn">UserEnricher</span>(<span class="type">String</span> apiToken) {
+        <span class="kw">this</span>.http = <span class="type">HttpClient</span>.newHttpClient();
+        <span class="kw">this</span>.apiToken = apiToken;
+    }
+
+    <span class="kw">public</span> <span class="type">EnrichedUser</span> <span class="fn">enrich</span>(<span class="type">User</span> user) <span class="kw">throws</span> <span class="type">IOException</span>, <span class="type">InterruptedException</span> {
+        <span class="type">HttpRequest</span> req = <span class="type">HttpRequest</span>.newBuilder()
+            .uri(<span class="type">URI</span>.create(<span class="type">BASE_URL</span> + <span class="str">"/users/"</span> + user.getId()))
+            .header(<span class="str">"Authorization"</span>, <span class="str">"Bearer "</span> + apiToken)
+            .GET().build();
+
+        <span class="type">HttpResponse</span>&lt;<span class="type">String</span>&gt; resp = http.send(req, <span class="type">HttpResponse</span>.<span class="type">BodyHandlers</span>.ofString());
+        <span class="kw">if</span> (resp.statusCode() == <span class="num">404</span>) <span class="kw">return</span> <span class="type">EnrichedUser</span>.minimal(user);
+        <span class="kw">if</span> (resp.statusCode() &gt;= <span class="num">500</span>) <span class="kw">throw new</span> <span class="type">ProfileServiceUnavailable</span>();
+
+        <span class="type">ProfileJson</span> profile = json.readValue(resp.body(), <span class="type">ProfileJson</span>.<span class="kw">class</span>);
+        <span class="kw">return</span> user.enrichedWith(profile.preferences, profile.segments);
+    }
+}</code></pre>
+
+<p>Testing <code>enrich</code>'s logic — fallback on 404, error on 5xx, merging enrichment data — requires a real profile service or a way to control HTTP responses. Both are much bigger than the logic itself.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List the operations the class performs against the remote. Here: <em>fetch a profile by user ID</em>. Just one.</li>
+  <li>Define an interface with methods that use <em>your</em> domain types. Method signatures should look like business operations, not HTTP calls.</li>
+  <li>Represent remote-specific error conditions (404, 5xx) either as distinct result types (sealed interface, <code>Optional</code>) or as domain exceptions. Don't leak HTTP status codes into the interface.</li>
+  <li>Implement the interface with a client adapter that owns the real HTTP client, builds requests, parses responses, and translates errors.</li>
+  <li>Change the original class to depend on the interface via constructor injection.</li>
+  <li>In tests, implement the interface directly with fakes.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// Interface you own, in domain terms</span>
+<span class="kw">public interface</span> <span class="type">ProfileService</span> {
+    <span class="type">Optional</span>&lt;<span class="type">UserProfile</span>&gt; <span class="fn">fetchProfile</span>(<span class="type">String</span> userId);
+}
+
+<span class="cmt">// Adapter — owns the HTTP client and the JSON</span>
+<span class="kw">public class</span> <span class="type">HttpProfileService</span> <span class="kw">implements</span> <span class="type">ProfileService</span> {
+    <span class="kw">private final</span> <span class="type">HttpClient</span> http;
+    <span class="kw">private final</span> <span class="type">String</span> baseUrl;
+    <span class="kw">private final</span> <span class="type">String</span> apiToken;
+    <span class="kw">private final</span> <span class="type">ObjectMapper</span> json = <span class="kw">new</span> <span class="type">ObjectMapper</span>();
+
+    <span class="kw">public</span> <span class="fn">HttpProfileService</span>(<span class="type">HttpClient</span> http, <span class="type">String</span> baseUrl, <span class="type">String</span> apiToken) {
+        <span class="kw">this</span>.http = http; <span class="kw">this</span>.baseUrl = baseUrl; <span class="kw">this</span>.apiToken = apiToken;
+    }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">Optional</span>&lt;<span class="type">UserProfile</span>&gt; <span class="fn">fetchProfile</span>(<span class="type">String</span> userId) {
+        <span class="kw">try</span> {
+            <span class="type">HttpResponse</span>&lt;<span class="type">String</span>&gt; resp = http.send(
+                <span class="type">HttpRequest</span>.newBuilder()
+                    .uri(<span class="type">URI</span>.create(baseUrl + <span class="str">"/users/"</span> + userId))
+                    .header(<span class="str">"Authorization"</span>, <span class="str">"Bearer "</span> + apiToken)
+                    .GET().build(),
+                <span class="type">HttpResponse</span>.<span class="type">BodyHandlers</span>.ofString());
+
+            <span class="kw">if</span> (resp.statusCode() == <span class="num">404</span>) <span class="kw">return</span> <span class="type">Optional</span>.empty();
+            <span class="kw">if</span> (resp.statusCode() &gt;= <span class="num">500</span>) <span class="kw">throw new</span> <span class="type">ProfileServiceUnavailable</span>();
+
+            <span class="type">ProfileJson</span> p = json.readValue(resp.body(), <span class="type">ProfileJson</span>.<span class="kw">class</span>);
+            <span class="kw">return</span> <span class="type">Optional</span>.of(<span class="kw">new</span> <span class="type">UserProfile</span>(p.preferences, p.segments));
+        } <span class="kw">catch</span> (<span class="type">IOException</span> | <span class="type">InterruptedException</span> e) {
+            <span class="kw">throw new</span> <span class="type">ProfileServiceUnavailable</span>(e);
+        }
+    }
+}
+
+<span class="cmt">// Code under test takes the interface</span>
+<span class="kw">public class</span> <span class="type">UserEnricher</span> {
+    <span class="kw">private final</span> <span class="type">ProfileService</span> profiles;
+
+    <span class="kw">public</span> <span class="fn">UserEnricher</span>(<span class="type">ProfileService</span> profiles) { <span class="kw">this</span>.profiles = profiles; }
+
+    <span class="kw">public</span> <span class="type">EnrichedUser</span> <span class="fn">enrich</span>(<span class="type">User</span> user) {
+        <span class="kw">return</span> profiles.fetchProfile(user.getId())
+            .map(p -&gt; user.enrichedWith(p.getPreferences(), p.getSegments()))
+            .orElseGet(() -&gt; <span class="type">EnrichedUser</span>.minimal(user));
+    }
+}
+
+<span class="cmt">// Test — no HTTP, no JSON parsing, no credentials</span>
+<span class="kw">class</span> <span class="type">FakeProfileService</span> <span class="kw">implements</span> <span class="type">ProfileService</span> {
+    <span class="kw">public</span> <span class="type">String</span> lastRequestedId;
+    <span class="kw">private</span> <span class="type">Optional</span>&lt;<span class="type">UserProfile</span>&gt; next = <span class="type">Optional</span>.empty();
+    <span class="kw">private</span> <span class="type">RuntimeException</span> nextError;
+
+    <span class="kw">public void</span> <span class="fn">willReturn</span>(<span class="type">UserProfile</span> p) { <span class="kw">this</span>.next = <span class="type">Optional</span>.of(p); <span class="kw">this</span>.nextError = <span class="kw">null</span>; }
+    <span class="kw">public void</span> <span class="fn">willReturnNotFound</span>() { <span class="kw">this</span>.next = <span class="type">Optional</span>.empty(); <span class="kw">this</span>.nextError = <span class="kw">null</span>; }
+    <span class="kw">public void</span> <span class="fn">willFailWith</span>(<span class="type">RuntimeException</span> e) { <span class="kw">this</span>.nextError = e; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">Optional</span>&lt;<span class="type">UserProfile</span>&gt; <span class="fn">fetchProfile</span>(<span class="type">String</span> userId) {
+        <span class="kw">this</span>.lastRequestedId = userId;
+        <span class="kw">if</span> (nextError != <span class="kw">null</span>) <span class="kw">throw</span> nextError;
+        <span class="kw">return</span> next;
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">enrichMergesProfilePreferencesAndSegments</span>() {
+    <span class="type">FakeProfileService</span> profiles = <span class="kw">new</span> <span class="type">FakeProfileService</span>();
+    profiles.willReturn(<span class="kw">new</span> <span class="type">UserProfile</span>(<span class="type">Map</span>.of(<span class="str">"theme"</span>, <span class="str">"dark"</span>), <span class="type">Set</span>.of(<span class="str">"premium"</span>)));
+
+    <span class="type">EnrichedUser</span> enriched = <span class="kw">new</span> <span class="type">UserEnricher</span>(profiles).enrich(<span class="type">User</span>.withId(<span class="str">"u-42"</span>));
+
+    <span class="fn">assertEquals</span>(<span class="str">"dark"</span>, enriched.getPreference(<span class="str">"theme"</span>));
+    <span class="fn">assertTrue</span>(enriched.inSegment(<span class="str">"premium"</span>));
+    <span class="fn">assertEquals</span>(<span class="str">"u-42"</span>, profiles.lastRequestedId);
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">enrichFallsBackToMinimalWhenProfileMissing</span>() {
+    <span class="type">FakeProfileService</span> profiles = <span class="kw">new</span> <span class="type">FakeProfileService</span>();
+    profiles.willReturnNotFound();
+
+    <span class="type">EnrichedUser</span> enriched = <span class="kw">new</span> <span class="type">UserEnricher</span>(profiles).enrich(<span class="type">User</span>.withId(<span class="str">"u-unknown"</span>));
+
+    <span class="fn">assertTrue</span>(enriched.isMinimal());
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">enrichPropagatesServiceFailures</span>() {
+    <span class="type">FakeProfileService</span> profiles = <span class="kw">new</span> <span class="type">FakeProfileService</span>();
+    profiles.willFailWith(<span class="kw">new</span> <span class="type">ProfileServiceUnavailable</span>());
+
+    <span class="fn">assertThrows</span>(<span class="type">ProfileServiceUnavailable</span>.<span class="kw">class</span>,
+        () -&gt; <span class="kw">new</span> <span class="type">UserEnricher</span>(profiles).enrich(<span class="type">User</span>.withId(<span class="str">"u-1"</span>)));
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>WireMock for HTTP integration tests</h4>
+
+<p>The adapter you wrote is itself untested by the unit tests above — they bypass it entirely. To cover the adapter's HTTP behavior (URL construction, header formatting, JSON parsing, status-code handling), spin up WireMock, MockWebServer (Square's), or a similar in-process HTTP server in integration tests. The tests drive your real <code>HttpProfileService</code> against the fake server and verify it makes the correct requests and interprets the correct responses.</p>
+
+<pre><code><span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">httpClientSendsBearerToken</span>() {
+    wireMock.stubFor(<span class="fn">get</span>(urlPathEqualTo(<span class="str">"/users/u-1"</span>))
+        .willReturn(<span class="fn">ok</span>().withBody(<span class="str">"{ ... }"</span>)));
+
+    <span class="kw">new</span> <span class="type">HttpProfileService</span>(<span class="type">HttpClient</span>.newHttpClient(), wireMock.baseUrl(), <span class="str">"secret"</span>)
+        .fetchProfile(<span class="str">"u-1"</span>);
+
+    wireMock.verify(<span class="fn">getRequestedFor</span>(urlEqualTo(<span class="str">"/users/u-1"</span>))
+        .withHeader(<span class="str">"Authorization"</span>, equalTo(<span class="str">"Bearer secret"</span>)));
+}</code></pre>
+
+<p>These integration tests are slower than unit tests (WireMock sets up a real HTTP server) but vastly faster and more reliable than hitting a real remote.</p>
+
+<h4>Vendor sandbox environments</h4>
+
+<p>Services like Stripe, Twilio, and AWS provide sandbox or test accounts with non-production endpoints. Integration tests can hit the sandbox to verify the real client library works against the real wire format. Keep these tests few, tagged separately, and run them outside the normal unit-test cycle. Don't use sandbox credentials in every test run.</p>
+
+<h4>Contract testing</h4>
+
+<p>For systems where your adapter needs to stay in sync with a remote service you don't control, <em>contract testing</em> (Pact, Spring Cloud Contract) lets you agree on the wire format once and verify both sides. Not a Chapter 25 technique and not a replacement for unit or integration tests — but it helps the adapter stay honest as the remote evolves.</p>
+
+<h4>Adapt Parameter (the Ch 25 sibling)</h4>
+
+<p>The generic form of this page. Read that one if the remote collaborator looks more like "a library with a Java API" and less like "something at the end of an HTTP connection". The mechanical fix is the same; the motivation differs.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Keep protocol types out of the interface</h4>
+
+<p>If the interface's methods return <code>HttpResponse</code> or <code>JsonNode</code> or vendor SDK types, you haven't really abstracted the network — you've just moved the HTTP code one level up. The test point: given an interface, can you write a non-HTTP implementation in a few lines? If no, your interface still carries protocol concerns.</p>
+
+<h4>One interface per remote, not one per call</h4>
+
+<p>A system with twelve calls against the profile service wants <em>one</em> <code>ProfileService</code> interface with twelve methods, not twelve interfaces. Group by the remote being called; each remote is one abstraction. Over-decomposing produces test setup that drowns in fakes.</p>
+
+<h4>Decide where retries live</h4>
+
+<p>Retries with exponential backoff often belong in the adapter (it knows about protocol-level transient failures). Sometimes they belong in the caller (business-logic-level "try harder" semantics). Either place is defensible; a clear decision matters. Don't let retries happen at both levels silently — you'll get an N<sup>2</sup> retry explosion under real failures.</p>
+
+<h4>Fakes aren't contracts</h4>
+
+<p>A fake that returns canned responses verifies <em>your code's behavior given certain responses</em>. It doesn't verify that the remote actually produces those responses. Keep a small set of integration tests (or contract tests) that bind the adapter to the real protocol shape. Unit tests alone can pass while production is broken.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Library / Framework Dependency → Adapt Parameter</em> is the generalized Ch 25 sibling. <em>Async Result Dependency → Supply Pre-Completed Results</em> often composes with this page when the network client is asynchronous — the client adapter returns <code>CompletableFuture</code>s, and tests supply pre-completed ones. <em>Filesystem Dependency → Abstract the Filesystem</em> is a close parallel for a different kind of external resource.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, with the specific technique being <em>Adapt Parameter</em> applied to a network boundary.
+</footer>
+
+</body>
+</html>

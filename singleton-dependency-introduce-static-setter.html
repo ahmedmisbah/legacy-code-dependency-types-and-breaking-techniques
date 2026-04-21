@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Singleton Dependency → Introduce Static Setter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Singleton Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Introduce Static Setter</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Singleton Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Introduce Static Setter</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>singleton dependency</strong> shows up wherever code reaches out to a class's <code>getInstance()</code> method (or equivalent static accessor) to obtain a shared object. The singleton owns its own construction, enforces uniqueness through a private constructor, and hands the same instance to everyone who asks. In tests, you inherit whatever the singleton is — there's no parameter, no field, no constructor argument to redirect.</p>
+
+<p>Singletons combine two testability obstacles at once: they're globals (always the same instance) <em>and</em> they're typically heavyweight services (database connections, HTTP clients, configuration loaders). Every test that touches a class using the singleton indirectly drags the singleton along for the ride.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Always the same instance</h4>
+
+<p>The point of a singleton is that <code>getInstance()</code> always returns the same object. In tests, that's exactly what you don't want — you want different test cases to see different behavior, and you want parallel test runs not to interfere with each other.</p>
+
+<h4>State leaks across tests</h4>
+
+<p>Singletons often hold state (caches, counters, connection pools). One test pollutes the singleton; the next test inherits the pollution. Test order becomes load-bearing. Developers learn to distrust the suite.</p>
+
+<h4>Eager initialization runs real work at class-load time</h4>
+
+<p>Many singletons instantiate themselves in a static initializer or on first access. If that instantiation talks to a database or reads a file, merely <em>loading</em> the class in a test triggers real I/O — before your test has even started.</p>
+
+<h4>The calling code has no injection point</h4>
+
+<p>Unlike a parameter or a field, a <code>getInstance()</code> call has nowhere for a caller to intervene. The class under test reaches out to the singleton directly, skipping every mechanism you'd normally use to substitute it.</p>
+
+<hr>
+
+<h2>The technique: Introduce Static Setter</h2>
+
+<p><strong>Introduce Static Setter</strong> opens a controlled back door: add a static method that lets tests replace the singleton instance with a fake. The setter is deliberately scoped (package-private or protected) so production code can't accidentally use it. Before each test, the setter installs a fake; after the test, the suite restores the real instance or resets the singleton.</p>
+
+<p>The technique doesn't solve the underlying design problem — you still have a singleton. What it does is create a seam where none existed, so the class that uses the singleton can at least be tested. Feathers presents it as a stepping-stone: get tests in place, then refactor toward proper dependency injection once the tests protect you.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>You have a singleton that many classes touch via <code>getInstance()</code>.</li>
+  <li>You own the singleton class (you can add a static setter to it).</li>
+  <li>You need tests in place <em>now</em> and can't afford to eliminate the singleton first.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The singleton comes from a third-party library and you can't modify it — consider wrapping it with an adapter instead.</li>
+  <li>Only one class uses the singleton — <em>Extract Interface</em> on the singleton plus field injection is cleaner.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>CheckoutController</code> reaches into <code>PaymentProcessor.getInstance()</code> every time it runs:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PaymentProcessor</span> {
+    <span class="kw">private static final</span> <span class="type">PaymentProcessor</span> <span class="type">INSTANCE</span> = <span class="kw">new</span> <span class="type">PaymentProcessor</span>();
+
+    <span class="kw">private</span> <span class="fn">PaymentProcessor</span>() {
+        <span class="cmt">// opens a real HTTPS connection to the payment gateway</span>
+    }
+
+    <span class="kw">public static</span> <span class="type">PaymentProcessor</span> <span class="fn">getInstance</span>() { <span class="kw">return</span> <span class="type">INSTANCE</span>; }
+
+    <span class="kw">public</span> <span class="type">ChargeResult</span> <span class="fn">charge</span>(<span class="type">Customer</span> c, <span class="type">Money</span> amount) { <span class="cmt">/* live call */</span> }
+}
+
+<span class="kw">public class</span> <span class="type">CheckoutController</span> {
+    <span class="kw">public</span> <span class="type">Receipt</span> <span class="fn">checkout</span>(<span class="type">Order</span> order) {
+        <span class="type">ChargeResult</span> r = <span class="type">PaymentProcessor</span>.getInstance()
+            .charge(order.getCustomer(), order.getTotal());
+        <span class="kw">if</span> (!r.ok()) <span class="kw">throw new</span> <span class="type">PaymentFailedException</span>();
+        <span class="kw">return new</span> <span class="type">Receipt</span>(order, r.getTxId());
+    }
+}</code></pre>
+
+<p>Merely loading <code>PaymentProcessor</code> opens the HTTPS connection. There is nowhere for a test to stop this.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Make the singleton's instance field non-<code>final</code> so it can be reassigned.</li>
+  <li>Relax the constructor's visibility enough that a test subclass can call it (or expose a test-only constructor).</li>
+  <li>Add a package-private or protected static setter — typically named <code>setTestingInstance</code> or similar — that assigns a new instance to the field.</li>
+  <li>Add a reset method that restores the original instance (often just by constructing a fresh one or by caching the original reference).</li>
+  <li>In tests, create a subclass of the singleton with overridden methods, call the setter in <code>@Before</code>, and call the reset in <code>@After</code>.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">PaymentProcessor</span> {
+    <span class="kw">private static</span> <span class="type">PaymentProcessor</span> instance = <span class="kw">new</span> <span class="type">PaymentProcessor</span>();
+
+    <span class="kw">protected</span> <span class="fn">PaymentProcessor</span>() { <span class="cmt">// now subclass-able from tests</span> }
+
+    <span class="kw">public static</span> <span class="type">PaymentProcessor</span> <span class="fn">getInstance</span>() { <span class="kw">return</span> instance; }
+
+    <span class="cmt">// Package-private: only tests in the same package can use it</span>
+    <span class="kw">static void</span> <span class="fn">setTestingInstance</span>(<span class="type">PaymentProcessor</span> testInstance) {
+        instance = testInstance;
+    }
+
+    <span class="kw">static void</span> <span class="fn">resetInstance</span>() {
+        instance = <span class="kw">new</span> <span class="type">PaymentProcessor</span>();
+    }
+
+    <span class="kw">public</span> <span class="type">ChargeResult</span> <span class="fn">charge</span>(<span class="type">Customer</span> c, <span class="type">Money</span> amount) { <span class="cmt">/* live call */</span> }
+}
+
+<span class="cmt">// Test subclass overrides the behavior we don't want</span>
+<span class="kw">class</span> <span class="type">FakePaymentProcessor</span> <span class="kw">extends</span> <span class="type">PaymentProcessor</span> {
+    <span class="kw">public</span> <span class="type">Money</span> lastAmount;
+    <span class="kw">public boolean</span> succeed = <span class="kw">true</span>;
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">ChargeResult</span> <span class="fn">charge</span>(<span class="type">Customer</span> c, <span class="type">Money</span> amount) {
+        lastAmount = amount;
+        <span class="kw">return</span> succeed ? <span class="type">ChargeResult</span>.ok(<span class="str">"test-1"</span>) : <span class="type">ChargeResult</span>.fail();
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">checkoutChargesCustomerTotal</span>() {
+    <span class="type">FakePaymentProcessor</span> fake = <span class="kw">new</span> <span class="type">FakePaymentProcessor</span>();
+    <span class="type">PaymentProcessor</span>.setTestingInstance(fake);
+    <span class="kw">try</span> {
+        <span class="kw">new</span> <span class="type">CheckoutController</span>().checkout(<span class="type">Order</span>.of(<span class="type">Money</span>.usd(<span class="num">49.99</span>)));
+        <span class="fn">assertEquals</span>(<span class="type">Money</span>.usd(<span class="num">49.99</span>), fake.lastAmount);
+    } <span class="kw">finally</span> {
+        <span class="type">PaymentProcessor</span>.resetInstance();
+    }
+}</code></pre>
+
+<p>Nothing has changed for production callers — they still call <code>getInstance()</code> and receive the real processor. The test has a seam it didn't have before.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Subclass and Override Method (on the singleton)</h4>
+
+<p>When you want to keep things self-contained in a single test and don't want to touch static state, you can sometimes bypass the singleton altogether: subclass the singleton, override the method you care about, and arrange for the code under test to use your subclass via another seam. This only works when the code under test uses the singleton through a reference you can inject — which, for classic Java singletons, is exactly the thing that's missing. When it applies, though, it avoids the global-state juggling that <em>Introduce Static Setter</em> requires.</p>
+
+<h4>Extract Interface on the singleton</h4>
+
+<p>A stepping-stone toward eliminating the singleton entirely. Extract an interface from the singleton's class, have clients accept the interface through their constructors (via <em>Parameterize Constructor</em>), and pass the singleton in at the composition root. The singleton is still there, but nobody except the composition root reaches for <code>getInstance()</code> anymore. Tests inject a fake implementation of the interface.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Teardown is mandatory</h4>
+
+<p>A test that calls <code>setTestingInstance</code> and doesn't reset leaves the fake in place for every subsequent test in the JVM. Put the reset in an <code>@After</code> method, a <code>try/finally</code>, or a test-framework fixture — not in the test body alone, where an assertion failure would skip it.</p>
+
+<h4>Parallel tests are unsafe</h4>
+
+<p>The setter writes shared global state. Two tests running simultaneously will clobber each other's fakes. Mark any class using this technique as serial, or migrate to constructor injection before enabling parallel test execution.</p>
+
+<h4>Static setters invite misuse</h4>
+
+<p>Even with package-private visibility, a static setter signals "mutable global" to anyone browsing the code. Some future developer will use it from production code to paper over a bug. Counter-measures: name the setter unmistakably (<code>setForTestingOnly</code>), put a Javadoc comment explaining its purpose, consider guarding it with a debug-only flag.</p>
+
+<h4>It doesn't fix the design</h4>
+
+<p>The singleton is still a singleton. The test seam is a patch, not a solution. Once tests cover the code, migrate toward proper injection: have clients accept the singleton's type as a constructor argument, and have a single top-level wiring point pass in the real instance.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Encapsulate Global References</em> targets raw globals (static fields, environment variables) — apply it when the global isn't a proper singleton but just a shared mutable value. <em>Introduce Instance Delegator</em> is the right fix when the problem is a static <em>method</em> rather than a singleton instance.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

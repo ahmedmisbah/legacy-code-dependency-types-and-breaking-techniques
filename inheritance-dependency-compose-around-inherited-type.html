@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inheritance Dependency → Compose Around the Inherited Type</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Inheritance Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Compose Around the Inherited Type</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Inheritance Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Compose Around the Inherited Type</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' <em>Pull Up Feature</em> technique addresses a different shape: pull testable logic up into a parent class you own. That doesn't help when the forced parent is a framework class (<code>HttpServlet</code>, <code>AbstractPageBean</code>, a Spring <code>ViewController</code>, a JPA <code>Repository</code> base) — you can't modify the parent, so there's no "up" to pull anything to. The modern Java pattern inverts the move: the framework-extending class becomes a thin shell that delegates to a plain class of your own, which is what gets tested.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>An <strong>inheritance dependency</strong> exists when a class is forced to extend a parent you don't control — a servlet base class, a framework lifecycle hook, an ORM entity superclass, a Spring <code>WebSecurityConfigurerAdapter</code>, a test-framework base class. The parent dictates construction, protected API surface, and often runtime lifecycle. Your class inherits all of that whether it wants to or not.</p>
+
+<p>The testability problem is that any test of the class runs through the parent. Instantiation invokes the parent's constructor (which may require a framework context). Methods you care about are often called by the framework, not by callers in your code, so you can't exercise them in isolation. And the interesting business logic is inevitably tangled with framework calls (<code>getSession()</code>, <code>getRequest()</code>, <code>persist()</code>) that pull in even more of the framework.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>You can't construct the class in isolation</h4>
+
+<p>A <code>HttpServlet</code> subclass works when the servlet container has done <code>init</code>. A JPA entity behaves correctly when the <code>EntityManager</code> is around. A Spring controller relies on the request-scoped beans. <code>new YourClass()</code> in a test produces an object the framework never sees — and the framework's absent contributions show up as <code>null</code>s and surprise exceptions.</p>
+
+<h4>Protected methods mean tests reach through the API</h4>
+
+<p>Framework parents typically expose hooks as <code>protected</code> methods (<code>doGet</code>, <code>onEvent</code>, <code>process</code>). In production the framework calls them; in tests you either subclass to expose them or call them via reflection. Either way, the test is picking at the internal shape of the class rather than exercising its purpose.</p>
+
+<h4>Business logic and framework logic are fused</h4>
+
+<p>Inside a <code>doPost</code> that validates a form and saves an order, the form-reading code knows <code>HttpServletRequest</code>, the validation code doesn't, and the saving code knows the database. They're all in one method because the framework forced them into the same class. There's no seam to isolate the validation by itself.</p>
+
+<h4>Single inheritance forecloses other options</h4>
+
+<p>Java permits only one superclass. If framework X requires you to extend <code>FrameworkXBase</code>, you can't <em>also</em> extend a class you wrote. Mixing framework inheritance with your own inheritance-based design is impossible — you have to choose, and the framework typically wins.</p>
+
+<hr>
+
+<h2>The technique: Compose Around the Inherited Type</h2>
+
+<p><strong>Compose Around the Inherited Type</strong> shrinks the framework-extending class to the minimum: it extracts request data, calls a plain handler class you own, and writes the response. The handler class has no framework parent, no framework types in its signatures, and receives everything it needs as plain arguments. It's a normal Java class — testable with <code>new</code>, no container required.</p>
+
+<p>This is sometimes called the "Humble Object" pattern: the framework-coupled part becomes a humble translator with almost no logic, and all the logic moves into a companion class that knows nothing about the framework. The testable surface is the companion; the framework class exists only to host the translation.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Your class extends a framework base class you don't own.</li>
+  <li>The class contains real business logic that deserves unit tests.</li>
+  <li>You can introduce a new class and wire it into the framework-extending class.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class is almost entirely framework plumbing with one line of interesting logic — extract the one line, don't build a whole handler for it.</li>
+  <li>The class genuinely exists to implement a framework contract (say, a custom <code>ViewResolver</code>) whose whole purpose is the framework behavior. Test it with framework-level integration tests.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>OrderServlet</code> extends <code>HttpServlet</code> and mixes form parsing, validation, and order submission:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderServlet</span> <span class="kw">extends</span> <span class="type">HttpServlet</span> {
+    <span class="kw">private final</span> <span class="type">OrderRepository</span> orders;
+    <span class="kw">private final</span> <span class="type">PriceService</span> pricing;
+
+    <span class="kw">public</span> <span class="fn">OrderServlet</span>(<span class="type">OrderRepository</span> orders, <span class="type">PriceService</span> pricing) {
+        <span class="kw">this</span>.orders = orders;
+        <span class="kw">this</span>.pricing = pricing;
+    }
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected void</span> <span class="fn">doPost</span>(<span class="type">HttpServletRequest</span> req, <span class="type">HttpServletResponse</span> resp) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="type">String</span> sku = req.getParameter(<span class="str">"sku"</span>);
+        <span class="type">String</span> qtyRaw = req.getParameter(<span class="str">"qty"</span>);
+        <span class="type">String</span> customerId = req.getParameter(<span class="str">"customer"</span>);
+
+        <span class="kw">if</span> (sku == <span class="kw">null</span> || qtyRaw == <span class="kw">null</span>) {
+            resp.sendError(<span class="num">400</span>, <span class="str">"missing parameters"</span>);
+            <span class="kw">return</span>;
+        }
+
+        <span class="kw">int</span> qty = <span class="type">Integer</span>.parseInt(qtyRaw);
+        <span class="kw">if</span> (qty &lt;= <span class="num">0</span>) {
+            resp.sendError(<span class="num">400</span>, <span class="str">"invalid quantity"</span>);
+            <span class="kw">return</span>;
+        }
+
+        <span class="type">Money</span> unitPrice = pricing.lookup(sku);
+        <span class="type">Order</span> order = <span class="kw">new</span> <span class="type">Order</span>(customerId, sku, qty, unitPrice.times(qty));
+        orders.save(order);
+
+        resp.setStatus(<span class="num">201</span>);
+        resp.getWriter().write(<span class="str">"{\"id\":\""</span> + order.getId() + <span class="str">"\"}"</span>);
+    }
+}</code></pre>
+
+<p>Testing the validation (missing parameters, negative quantity) requires a <code>HttpServletRequest</code> and <code>HttpServletResponse</code>. Mocking both is noisy. Running a real servlet container is worse. And the actual order-submission logic — the part worth testing — is wedged between I/O concerns you can't easily separate.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the business logic that isn't inherently framework-coupled (validation rules, order construction, price calculation — not HTTP status codes or response bodies).</li>
+  <li>Create a new handler class taking plain Java arguments and returning a plain Java result (or throwing a plain Java exception).</li>
+  <li>Move the business logic into the handler. Replace framework calls with parameters or fields on the handler.</li>
+  <li>Shrink the framework-extending class to: parse framework input into handler arguments, call the handler, translate the handler's result into framework output.</li>
+  <li>Test the handler directly with <code>new</code>. Framework-level tests cover the thin translator if needed.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// The handler — plain Java, no framework parent</span>
+<span class="kw">public class</span> <span class="type">OrderSubmissionHandler</span> {
+    <span class="kw">private final</span> <span class="type">OrderRepository</span> orders;
+    <span class="kw">private final</span> <span class="type">PriceService</span> pricing;
+
+    <span class="kw">public</span> <span class="fn">OrderSubmissionHandler</span>(<span class="type">OrderRepository</span> orders, <span class="type">PriceService</span> pricing) {
+        <span class="kw">this</span>.orders = orders;
+        <span class="kw">this</span>.pricing = pricing;
+    }
+
+    <span class="kw">public</span> <span class="type">Order</span> <span class="fn">submit</span>(<span class="type">OrderRequest</span> request) {
+        <span class="kw">if</span> (request.sku() == <span class="kw">null</span>) <span class="kw">throw new</span> <span class="type">MissingParameterException</span>(<span class="str">"sku"</span>);
+        <span class="kw">if</span> (request.qty() &lt;= <span class="num">0</span>) <span class="kw">throw new</span> <span class="type">InvalidQuantityException</span>(request.qty());
+
+        <span class="type">Money</span> unitPrice = pricing.lookup(request.sku());
+        <span class="type">Order</span> order = <span class="kw">new</span> <span class="type">Order</span>(request.customerId(), request.sku(), request.qty(),
+                                  unitPrice.times(request.qty()));
+        orders.save(order);
+        <span class="kw">return</span> order;
+    }
+}
+
+<span class="cmt">// Small record for handler input (Java 14+ syntax shown)</span>
+<span class="kw">public record</span> <span class="type">OrderRequest</span>(<span class="type">String</span> customerId, <span class="type">String</span> sku, <span class="kw">int</span> qty) {}
+
+<span class="cmt">// The servlet — now a thin translator</span>
+<span class="kw">public class</span> <span class="type">OrderServlet</span> <span class="kw">extends</span> <span class="type">HttpServlet</span> {
+    <span class="kw">private final</span> <span class="type">OrderSubmissionHandler</span> handler;
+
+    <span class="kw">public</span> <span class="fn">OrderServlet</span>(<span class="type">OrderSubmissionHandler</span> handler) { <span class="kw">this</span>.handler = handler; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected void</span> <span class="fn">doPost</span>(<span class="type">HttpServletRequest</span> req, <span class="type">HttpServletResponse</span> resp) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="kw">try</span> {
+            <span class="type">OrderRequest</span> r = <span class="kw">new</span> <span class="type">OrderRequest</span>(
+                req.getParameter(<span class="str">"customer"</span>),
+                req.getParameter(<span class="str">"sku"</span>),
+                parseQty(req.getParameter(<span class="str">"qty"</span>)));
+            <span class="type">Order</span> order = handler.submit(r);
+            resp.setStatus(<span class="num">201</span>);
+            resp.getWriter().write(<span class="str">"{\"id\":\""</span> + order.getId() + <span class="str">"\"}"</span>);
+        } <span class="kw">catch</span> (<span class="type">MissingParameterException</span> | <span class="type">InvalidQuantityException</span> e) {
+            resp.sendError(<span class="num">400</span>, e.getMessage());
+        }
+    }
+
+    <span class="kw">private static int</span> <span class="fn">parseQty</span>(<span class="type">String</span> raw) {
+        <span class="kw">if</span> (raw == <span class="kw">null</span>) <span class="kw">throw new</span> <span class="type">MissingParameterException</span>(<span class="str">"qty"</span>);
+        <span class="kw">return</span> <span class="type">Integer</span>.parseInt(raw);
+    }
+}
+
+<span class="cmt">// Tests — no servlet container, no framework at all</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">rejectsNegativeQuantity</span>() {
+    <span class="type">OrderSubmissionHandler</span> h = <span class="kw">new</span> <span class="type">OrderSubmissionHandler</span>(
+        <span class="kw">new</span> <span class="type">InMemoryOrderRepository</span>(), <span class="type">PriceService</span>.flat(<span class="type">Money</span>.usd(<span class="num">10</span>)));
+
+    <span class="fn">assertThrows</span>(<span class="type">InvalidQuantityException</span>.<span class="kw">class</span>,
+        () -&gt; h.submit(<span class="kw">new</span> <span class="type">OrderRequest</span>(<span class="str">"cust-1"</span>, <span class="str">"SKU-1"</span>, -<span class="num">3</span>)));
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">savesOrderWithCalculatedTotal</span>() {
+    <span class="type">InMemoryOrderRepository</span> repo = <span class="kw">new</span> <span class="type">InMemoryOrderRepository</span>();
+    <span class="type">OrderSubmissionHandler</span> h = <span class="kw">new</span> <span class="type">OrderSubmissionHandler</span>(repo, <span class="type">PriceService</span>.flat(<span class="type">Money</span>.usd(<span class="num">10</span>)));
+
+    <span class="type">Order</span> order = h.submit(<span class="kw">new</span> <span class="type">OrderRequest</span>(<span class="str">"cust-1"</span>, <span class="str">"SKU-1"</span>, <span class="num">3</span>));
+
+    <span class="fn">assertEquals</span>(<span class="type">Money</span>.usd(<span class="num">30</span>), order.getTotal());
+    <span class="fn">assertSame</span>(order, repo.findById(order.getId()));
+}</code></pre>
+
+<p>The handler has no <code>HttpServletRequest</code>, no response, no framework init. The servlet is a ten-line translator whose only interesting behavior is mapping exception types to HTTP statuses — if that mapping grows complex, it becomes a small tested function on its own. Framework-level integration tests verify the servlet/handler wiring, but the business logic has a fast, focused unit-test surface.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract Interface on the handler</h4>
+
+<p>Once the handler exists, you can extract an interface from it if multiple implementations make sense (real handler, feature-flagged handler, logging handler). The servlet depends on the interface, not the concrete class. This is straight <em>Extract Interface</em> from Ch 25 applied to the newly-extracted handler.</p>
+
+<h4>Keep the translator boring</h4>
+
+<p>Every line of logic you leave in the servlet is a line you can't unit-test cheaply. If you find yourself adding <code>if</code> statements, format-detection, or retry loops to the servlet, those almost certainly want to be on the handler side. The discipline is: the servlet does framework-shaped translation, and nothing else.</p>
+
+<h4>Parameterize Constructor</h4>
+
+<p>The handler is wired into the servlet via constructor injection. Framework-specific instantiation (Spring's <code>@Autowired</code>, CDI's <code>@Inject</code>, ServletConfig.getInitParameter) is done in the framework-extending class; the handler receives plain dependencies. Same principle as the DI Container Dependency page applied at a different level.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't duplicate the framework's job</h4>
+
+<p>If your handler accepts a <code>Map&lt;String,String&gt;</code> of parameters and starts doing HTTP-specific parsing (checking content types, decoding URLs), you've rebuilt a servlet inside your handler. Let the framework do framework things; the handler takes already-parsed, already-typed arguments.</p>
+
+<h4>Framework-lifecycle logic stays on the framework side</h4>
+
+<p>Methods like <code>init</code>, <code>destroy</code>, <code>@PostConstruct</code> handle framework lifecycle. They belong in the framework-extending class. If they contain business logic (eager cache loading, for instance), extract that logic into a method the handler can call, and have the lifecycle hook call into the handler.</p>
+
+<h4>One handler per endpoint is usually right</h4>
+
+<p>A servlet that serves five related HTTP endpoints can delegate to five handlers (or one handler with five methods, depending on cohesion). Resist the urge to build a single <code>GenericHandler</code> that takes an operation name — that's rebuilding a router in miniature.</p>
+
+<h4>Integration tests still earn their place</h4>
+
+<p>Unit tests cover the handler's logic. A small number of integration tests cover the servlet's translation: that missing parameters produce 400, that a successful submission returns 201 with a JSON body, that the right MIME types are set. Those integration tests are few and fast because they don't test anything the handler tests already cover.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameter dependency → Extract Interface</em> applies once the handler exists and you want to vary its behavior. <em>DI Container Dependency → Bypass the Container</em> covers the broader design discipline this page instantiates for the specific case of framework inheritance. <em>Final / Sealed Dependency → Wrap with a Hand-Written Adapter</em> handles the adjacent problem where the framework class can't be subclassed <em>or</em> swapped by an interface.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific technique ("Humble Object" / composition over forced inheritance) is a pattern the Java community converged on after the book.
+</footer>
+
+</body>
+</html>

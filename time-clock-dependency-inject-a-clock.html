@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Time / Clock Dependency → Inject a Clock</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Time / Clock Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Inject a Clock</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Time / Clock Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Inject a Clock</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' catalog doesn't name a technique for time. The closest principle is <em>Encapsulate Global References</em>, and the closest shape of fix is <em>Parameterize Constructor</em> with the wrapped global. What's new here is that modern Java provides a standard type — <code>java.time.Clock</code> (added in Java 8, 2014) — so the encapsulation has a canonical name, API, and test helpers. The book, published in 2004, pre-dates all of it.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>time / clock dependency</strong> appears wherever code reaches for the system clock: <code>System.currentTimeMillis()</code>, <code>Instant.now()</code>, <code>LocalDateTime.now()</code>, <code>new Date()</code>, <code>Calendar.getInstance()</code>. Each call consults the OS, returns whatever it reports, and moves on. The class using these calls is bound to the wall clock.</p>
+
+<p>Anything time-dependent inherits the problem: session expirations, business-hours checks, retry backoffs, cache TTLs, daily batch cutoffs, log timestamps, audit trails, discount windows. All of them read <em>now</em> implicitly, and every test of them is at the mercy of when it happens to run.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Every test run produces a different timeline</h4>
+
+<p>A test that checks <em>"an order 25 hours old should be expired"</em> gets a different absolute timestamp each run. The relative assertion might hold, but any log, audit entry, or returned object containing <code>Instant.now()</code> is different every time — so assertions on those fields either approximate (which hides bugs) or capture the current time and pretend that was the expected value (which is circular).</p>
+
+<h4>Boundary cases require waiting or fakery</h4>
+
+<p>Testing <em>"what happens at midnight UTC?"</em> or <em>"what happens when daylight saving time ends?"</em> requires either waiting for the real time to get there, running the test at the right moment, or setting the system clock — all bad options. Most teams give up and leave these paths untested, which is where bugs live.</p>
+
+<h4>Past and future dates are unreachable</h4>
+
+<p>You can't easily test a class that behaves differently in 2099 without falsifying the system clock. The same applies to <em>"what did this system do last year"</em> kinds of backfill logic. Real time only flows forward at one speed.</p>
+
+<h4>Flaky tests erode trust</h4>
+
+<p>Tests that pass <em>most</em> of the time because of a near-boundary condition (a sleep, a timing assumption) train the team to ignore failures. The suite becomes folklore rather than a truth source. Deterministic time removes this class of flakiness entirely.</p>
+
+<hr>
+
+<h2>The technique: Inject a Clock</h2>
+
+<p><strong>Inject a Clock</strong> replaces direct calls to time primitives with calls on an injected <code>java.time.Clock</code> instance. The class's constructor takes a <code>Clock</code>; production wiring passes <code>Clock.systemDefaultZone()</code> or <code>Clock.systemUTC()</code>; tests pass <code>Clock.fixed(instant, zone)</code> for a frozen clock or a custom mutable clock for simulated time progression.</p>
+
+<p>The clock becomes the single point where the class asks <em>what time is it?</em>. Every time-dependent API in <code>java.time</code> accepts a <code>Clock</code> as an overload: <code>Instant.now(clock)</code>, <code>LocalDateTime.now(clock)</code>, <code>ZonedDateTime.now(clock)</code>. There is no escape hatch from the injected clock unless the code explicitly avoids it.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Any class whose behavior depends on the current time.</li>
+  <li>Tests need to verify time-dependent logic deterministically.</li>
+  <li>You can change the class's constructor (or use an existing DI mechanism).</li>
+  <li>The codebase is on Java 8 or later.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The codebase is pre-Java-8 and can't upgrade — roll your own <code>TimeSource</code> wrapper with the same shape.</li>
+  <li>Time is used only in one method for logging a timestamp that no test will ever assert on — injection is overkill for passive uses.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>OrderService</code> reads the wall clock directly:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private static final</span> <span class="type">Duration</span> <span class="type">EXPIRY</span> = <span class="type">Duration</span>.ofHours(<span class="num">24</span>);
+
+    <span class="kw">public boolean</span> <span class="fn">isExpired</span>(<span class="type">Order</span> order) {
+        <span class="kw">return</span> <span class="type">Duration</span>.between(order.getCreatedAt(), <span class="type">Instant</span>.now())
+            .compareTo(<span class="type">EXPIRY</span>) &gt;= <span class="num">0</span>;
+    }
+
+    <span class="kw">public</span> <span class="type">Order</span> <span class="fn">submit</span>(<span class="type">Cart</span> cart) {
+        <span class="kw">return new</span> <span class="type">Order</span>(cart, <span class="type">Instant</span>.now());
+    }
+}</code></pre>
+
+<p>Testing <code>isExpired</code> at exactly the 24-hour boundary requires carefully constructing an order whose <code>createdAt</code> is 24 hours before <em>now</em>, which means either capturing <code>Instant.now()</code> in the test (making the test a circular self-check), or sleeping, or doing arithmetic the test itself depends on.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List every call to a time primitive in the class: <code>Instant.now()</code>, <code>LocalDateTime.now()</code>, <code>System.currentTimeMillis()</code>, <code>new Date()</code>, and so on.</li>
+  <li>Add a <code>Clock clock</code> field and a constructor parameter for it.</li>
+  <li>Add a convenience no-arg constructor that defaults to <code>Clock.systemUTC()</code> (or <code>systemDefaultZone()</code>) so existing callers don't break.</li>
+  <li>Replace each time-primitive call with the clock-aware variant: <code>Instant.now(clock)</code>, <code>LocalDateTime.now(clock)</code>, <code>clock.millis()</code>, <code>Date.from(clock.instant())</code>.</li>
+  <li>In tests, pass <code>Clock.fixed(Instant.parse("..."), ZoneOffset.UTC)</code> for frozen time, or a custom mutable clock for tests that need to advance time within a single test.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private static final</span> <span class="type">Duration</span> <span class="type">EXPIRY</span> = <span class="type">Duration</span>.ofHours(<span class="num">24</span>);
+    <span class="kw">private final</span> <span class="type">Clock</span> clock;
+
+    <span class="kw">public</span> <span class="fn">OrderService</span>(<span class="type">Clock</span> clock) { <span class="kw">this</span>.clock = clock; }
+    <span class="kw">public</span> <span class="fn">OrderService</span>() { <span class="kw">this</span>(<span class="type">Clock</span>.systemUTC()); }
+
+    <span class="kw">public boolean</span> <span class="fn">isExpired</span>(<span class="type">Order</span> order) {
+        <span class="kw">return</span> <span class="type">Duration</span>.between(order.getCreatedAt(), <span class="type">Instant</span>.now(clock))
+            .compareTo(<span class="type">EXPIRY</span>) &gt;= <span class="num">0</span>;
+    }
+
+    <span class="kw">public</span> <span class="type">Order</span> <span class="fn">submit</span>(<span class="type">Cart</span> cart) {
+        <span class="kw">return new</span> <span class="type">Order</span>(cart, <span class="type">Instant</span>.now(clock));
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">orderExpiresExactlyAt24Hours</span>() {
+    <span class="type">Instant</span> createdAt = <span class="type">Instant</span>.parse(<span class="str">"2026-04-20T10:00:00Z"</span>);
+    <span class="type">Clock</span> at24Hours = <span class="type">Clock</span>.fixed(createdAt.plus(<span class="type">Duration</span>.ofHours(<span class="num">24</span>)), <span class="type">ZoneOffset</span>.<span class="type">UTC</span>);
+
+    <span class="type">OrderService</span> svc = <span class="kw">new</span> <span class="type">OrderService</span>(at24Hours);
+    <span class="fn">assertTrue</span>(svc.isExpired(<span class="type">Order</span>.createdAt(createdAt)));
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">orderNotYetExpiredAt23Hours59Minutes</span>() {
+    <span class="type">Instant</span> createdAt = <span class="type">Instant</span>.parse(<span class="str">"2026-04-20T10:00:00Z"</span>);
+    <span class="type">Instant</span> almost24h = createdAt.plus(<span class="type">Duration</span>.ofHours(<span class="num">23</span>).plusMinutes(<span class="num">59</span>));
+    <span class="type">Clock</span> clock = <span class="type">Clock</span>.fixed(almost24h, <span class="type">ZoneOffset</span>.<span class="type">UTC</span>);
+
+    <span class="type">OrderService</span> svc = <span class="kw">new</span> <span class="type">OrderService</span>(clock);
+    <span class="fn">assertFalse</span>(svc.isExpired(<span class="type">Order</span>.createdAt(createdAt)));
+}</code></pre>
+
+<p>Both boundary cases are now deterministic and require no sleeping, no real-time math, no system clock manipulation.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>A mutable clock for progression tests</h4>
+
+<p>When the test needs time to advance within a single run — a session timing out mid-test, a cache TTL expiring — <code>Clock.fixed</code> isn't enough. A small mutable clock makes this easy:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">MutableClock</span> <span class="kw">extends</span> <span class="type">Clock</span> {
+    <span class="kw">private</span> <span class="type">Instant</span> now;
+    <span class="kw">private final</span> <span class="type">ZoneId</span> zone;
+
+    <span class="kw">public</span> <span class="fn">MutableClock</span>(<span class="type">Instant</span> start) { <span class="kw">this</span>(start, <span class="type">ZoneOffset</span>.<span class="type">UTC</span>); }
+    <span class="kw">public</span> <span class="fn">MutableClock</span>(<span class="type">Instant</span> start, <span class="type">ZoneId</span> zone) {
+        <span class="kw">this</span>.now = start; <span class="kw">this</span>.zone = zone;
+    }
+
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">Instant</span> <span class="fn">instant</span>() { <span class="kw">return</span> now; }
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">ZoneId</span> <span class="fn">getZone</span>() { <span class="kw">return</span> zone; }
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">Clock</span> <span class="fn">withZone</span>(<span class="type">ZoneId</span> z) { <span class="kw">return new</span> <span class="type">MutableClock</span>(now, z); }
+
+    <span class="kw">public void</span> <span class="fn">advance</span>(<span class="type">Duration</span> d) { now = now.plus(d); }
+}</code></pre>
+
+<p>The test manually advances the clock where real code would have waited.</p>
+
+<h4>Extract and Override Getter (pre-Java-8 fallback)</h4>
+
+<p>If you can't take the constructor-injection route — pre-Java-8 codebase, or a class that genuinely can't have its constructor changed — fall back to Feathers' <em>Extract and Override Getter</em>: wrap time access in a protected method (<code>protected Instant now() { return Instant.now(); }</code>) and override it in a test subclass. Less clean than Clock injection but works anywhere.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't mix clock-aware and clock-free calls</h4>
+
+<p>Once a class has a <code>Clock</code>, every time reference should go through it. One stray <code>Instant.now()</code> defeats the whole exercise and produces tests that fail mysteriously under load. Static analysis rules (or a git grep) help enforce discipline.</p>
+
+<h4>Be consistent about zones</h4>
+
+<p>UTC is safest for tests. Production may use <code>systemDefaultZone()</code>, but if your domain logic cares about local time (billing cycles, delivery windows), make the zone an explicit concern — never rely on the JVM's default zone silently affecting behavior.</p>
+
+<h4>Spring and other DI containers make this trivial</h4>
+
+<p>Declaring a <code>@Bean Clock clock() { return Clock.systemUTC(); }</code> in a Spring configuration class lets every <code>@Autowired</code> constructor receive the clock automatically. Tests override the bean with <code>@TestConfiguration</code> providing a fixed or mutable clock.</p>
+
+<h4>Logging timestamps are usually fine to leave alone</h4>
+
+<p>The clock-injection discipline applies to <em>business logic</em> that depends on time. Log frameworks have their own timestamping that isn't part of the class's behavior and doesn't need the same treatment. Keep the scope clear.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Encapsulate Global References</em> is the Ch 25 principle this applies to the specific case of time. <em>Parameterize Constructor</em> is the mechanism for injecting the clock. <em>Randomness Dependency → Inject a Random Source</em> is the twin problem for random numbers and UUIDs.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific technique (<em>Inject a Clock</em>) is a post-2004 Java community convention.
+</footer>
+
+</body>
+</html>

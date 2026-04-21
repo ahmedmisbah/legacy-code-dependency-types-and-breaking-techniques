@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parameter Dependency → Extract Interface</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Parameter Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Extract Interface</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Parameter Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract Interface</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>parameter dependency</strong> appears when a method takes an argument whose type is difficult or impossible to instantiate in a test. The method's contract with its caller says <em>"give me one of these"</em> — but the caller, including your test, can't readily produce one. The painful types are usually concrete classes with heavy behavior (database clients, HTTP sessions, thread pools) or framework types whose construction requires a full runtime context.</p>
+
+<p>Unlike a constructor dependency, a parameter dependency is visible at the call site. The type appears in the method signature, so anyone reading the code can see what's required. That makes it easier to reason about than hidden dependencies — but it doesn't make it easier to test, because you still have to supply the real thing (or find another way) every time you want to exercise the method.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<p>Parameter dependencies produce a specific flavor of the sensing/separation problem: the method itself is accessible (you can call it from a test), but what you have to pass in isn't.</p>
+
+<h4>The parameter may be impossible to construct</h4>
+
+<p>Types like <code>HttpServletRequest</code>, <code>ResultSet</code>, or an internal framework request wrapper are not instantiable in isolation. They assume a servlet container, a JDBC driver, or a live framework runtime. Your test can't just call <code>new</code> on them.</p>
+
+<h4>The parameter's real behavior drags in real infrastructure</h4>
+
+<p>Even when the parameter can be constructed, using a real one often means real I/O. Passing a real <code>PaymentGateway</code> means real charges; passing a real <code>Database</code> means real queries. The test inherits every problem of the real collaborator.</p>
+
+<h4>You can't observe what the method did to the parameter</h4>
+
+<p>If the method mutates the parameter or calls methods on it, the test wants to see that. With a concrete type and no handle on its internal state, the only way to check is through the parameter's own observable interface — which, for framework types, is usually backed by the same infrastructure you were trying to avoid.</p>
+
+<h4>Type coupling propagates to every caller</h4>
+
+<p>The concrete parameter type doesn't just affect this method. Everywhere this method is called, the caller has to produce that concrete type. The testing problem multiplies as it spreads through the callers.</p>
+
+<div class="note">
+<strong>Sensing vs. separation here.</strong> Extract Interface gives you a test-controlled implementation you can <em>pass in</em> (separation) and <em>inspect afterwards</em> (sensing). One technique, both problems solved.
+</div>
+
+<hr>
+
+<h2>The technique: Extract Interface</h2>
+
+<p><strong>Extract Interface</strong> pulls the methods the caller actually invokes on the parameter into a new interface. The method's signature changes to accept the interface rather than the concrete class. The original concrete class is declared to implement the interface, so production code keeps working unchanged. In tests, you supply a hand-written fake that implements the same interface.</p>
+
+<p>Feathers calls it one of the safest techniques in the catalog. The concrete class keeps all its code; the interface is a pure declaration of methods the class already has. Mistakes tend to be caught by the compiler.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>The parameter's type is a class you control (you can add <code>implements</code> to it).</li>
+  <li>The method under test calls only a handful of the parameter's methods — you want a narrow interface reflecting actual use, not an exhaustive mirror.</li>
+  <li>You want a technique that's safe to apply without tests already in place.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The parameter is a framework or third-party type you can't modify — use <em>Adapt Parameter</em> instead.</li>
+  <li>The parameter's class is <code>final</code> and you can't unseal it — again, Adapt Parameter or a hand-written wrapper.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>ReportGenerator.generate</code> takes a concrete <code>DataSource</code> that opens real database connections:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">DataSource</span> {
+    <span class="kw">public</span> <span class="fn">DataSource</span>(<span class="type">String</span> jdbcUrl, <span class="type">Credentials</span> creds) {
+        <span class="cmt">// opens a real connection pool</span>
+    }
+
+    <span class="kw">public</span> <span class="type">ResultSet</span> <span class="fn">query</span>(<span class="type">String</span> sql) { <span class="cmt">/* live query */</span> }
+    <span class="kw">public void</span> <span class="fn">close</span>() { <span class="cmt">/* ... */</span> }
+    <span class="kw">public</span> <span class="type">ConnectionStats</span> <span class="fn">stats</span>() { <span class="cmt">/* ... */</span> }
+}
+
+<span class="kw">public class</span> <span class="type">ReportGenerator</span> {
+    <span class="kw">public</span> <span class="type">Report</span> <span class="fn">generate</span>(<span class="type">DataSource</span> dataSource, <span class="type">DateRange</span> range) {
+        <span class="type">ResultSet</span> rs = dataSource.query(<span class="str">"SELECT ... WHERE date BETWEEN ..."</span>);
+        <span class="kw">return</span> buildReport(rs);
+    }
+}</code></pre>
+
+<p>Any test of <code>generate</code> has to supply a <code>DataSource</code>, which means a real connection pool.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List the methods that <code>ReportGenerator.generate</code> actually calls on the <code>DataSource</code> parameter. In this case, just <code>query</code>.</li>
+  <li>Create an interface declaring those methods, using a name focused on the role (<code>QueryRunner</code>) rather than the class (<code>DataSource</code>).</li>
+  <li>Declare the original concrete class to implement the interface. No method changes are required — the class already has the methods.</li>
+  <li>Change the parameter type in <code>generate</code> from <code>DataSource</code> to the new interface.</li>
+  <li>In tests, create a fake that implements the interface and returns canned data.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public interface</span> <span class="type">QueryRunner</span> {
+    <span class="type">ResultSet</span> <span class="fn">query</span>(<span class="type">String</span> sql);
+}
+
+<span class="kw">public class</span> <span class="type">DataSource</span> <span class="kw">implements</span> <span class="type">QueryRunner</span> {
+    <span class="cmt">// unchanged — the class already had a query(String) method</span>
+}
+
+<span class="kw">public class</span> <span class="type">ReportGenerator</span> {
+    <span class="kw">public</span> <span class="type">Report</span> <span class="fn">generate</span>(<span class="type">QueryRunner</span> runner, <span class="type">DateRange</span> range) {
+        <span class="type">ResultSet</span> rs = runner.query(<span class="str">"SELECT ... WHERE date BETWEEN ..."</span>);
+        <span class="kw">return</span> buildReport(rs);
+    }
+}
+
+<span class="cmt">// In tests</span>
+<span class="kw">public class</span> <span class="type">FakeQueryRunner</span> <span class="kw">implements</span> <span class="type">QueryRunner</span> {
+    <span class="kw">public</span> <span class="type">String</span> lastSql;
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">ResultSet</span> <span class="fn">query</span>(<span class="type">String</span> sql) {
+        lastSql = sql;
+        <span class="kw">return</span> <span class="type">FakeResultSet</span>.withRows(sampleData());
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">generatesReportFromQueryResults</span>() {
+    <span class="type">FakeQueryRunner</span> fake = <span class="kw">new</span> <span class="type">FakeQueryRunner</span>();
+    <span class="type">Report</span> report = <span class="kw">new</span> <span class="type">ReportGenerator</span>().generate(fake, <span class="type">DateRange</span>.lastMonth());
+
+    <span class="fn">assertNotNull</span>(report);
+    <span class="fn">assertTrue</span>(fake.lastSql.contains(<span class="str">"BETWEEN"</span>));
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Adapt Parameter</h4>
+
+<p>When the parameter's class is a framework or third-party type you can't modify, you can't declare <code>implements</code> on it. <em>Adapt Parameter</em> is the workaround: define your own interface, write a small adapter that wraps the framework object and delegates to it, and change the method signature to take your interface instead of the framework type.</p>
+
+<p class="before-after">Before — <code>populate</code> takes a Servlet API type:</p>
+
+<pre><code><span class="kw">public void</span> <span class="fn">populate</span>(<span class="type">HttpServletRequest</span> request) {
+    <span class="type">String</span>[] values = request.getParameterValues(<span class="str">"pageState"</span>);
+    <span class="cmt">// ...</span>
+}</code></pre>
+
+<p class="before-after">After — a small interface you control, an adapter for production, a fake for tests:</p>
+
+<pre><code><span class="kw">public interface</span> <span class="type">ParameterSource</span> {
+    <span class="type">String</span>[] <span class="fn">getValues</span>(<span class="type">String</span> name);
+}
+
+<span class="kw">public class</span> <span class="type">HttpRequestAdapter</span> <span class="kw">implements</span> <span class="type">ParameterSource</span> {
+    <span class="kw">private final</span> <span class="type">HttpServletRequest</span> request;
+    <span class="kw">public</span> <span class="fn">HttpRequestAdapter</span>(<span class="type">HttpServletRequest</span> r) { <span class="kw">this</span>.request = r; }
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">String</span>[] <span class="fn">getValues</span>(<span class="type">String</span> name) { <span class="kw">return</span> request.getParameterValues(name); }
+}
+
+<span class="kw">public void</span> <span class="fn">populate</span>(<span class="type">ParameterSource</span> source) {
+    <span class="type">String</span>[] values = source.getValues(<span class="str">"pageState"</span>);
+    <span class="cmt">// ...</span>
+}</code></pre>
+
+<h4>Subclass and Override Method</h4>
+
+<p>If the parameter's class is yours but you'd rather not introduce a new interface (perhaps because only this one test site needs to vary its behavior), you can subclass the parameter's class and override the specific methods the code under test calls. Pass an instance of the subclass in the test. This keeps the production signature unchanged, but it only works when the class isn't <code>final</code> and the methods aren't <code>final</code>.</p>
+
+<h4>Primitivize Parameter</h4>
+
+<p>Occasionally the parameter's class is so hard to fake that a cleaner path is to write a helper method working on primitives or simple value types, call it from the original method, and test the helper directly. This leaves the original method with the awkward parameter untested, but covers its core logic. Feathers presents it as a fallback when interface extraction isn't viable.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Keep the interface lean</h4>
+
+<p>The temptation is to mirror every public method of the class onto the interface. Resist it. Put only the methods that <em>this particular caller</em> actually invokes. A narrow interface communicates intent (<em>"this method needs something that can run queries"</em>) and supports the Interface Segregation Principle.</p>
+
+<h4>Name after the role, not the class</h4>
+
+<p>Don't call the interface <code>IDataSource</code> or <code>DataSourceInterface</code>. Call it what the parameter <em>does</em> in this context — <code>QueryRunner</code>, <code>PriceLookup</code>, <code>MessageSink</code>. Good names signal role, not implementation.</p>
+
+<h4>Signature preservation</h4>
+
+<p>When copying methods into the interface, copy them verbatim — same parameter names, same <code>throws</code> clauses, same return types. Retyping invites subtle drift that the compiler can't always catch.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Extract Implementer</em> is the C++ variant of Extract Interface (renames the concrete class instead of adding an interface on top) — rarely needed in Java, where tool support for Extract Interface is excellent. <em>Parameterize Method</em> is a sibling for cases where you want to pass something different into a method without introducing a new type at all.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

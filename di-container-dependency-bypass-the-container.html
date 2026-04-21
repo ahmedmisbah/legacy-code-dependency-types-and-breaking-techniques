@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DI Container Dependency → Bypass the Container</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>DI Container Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Bypass the Container</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">DI Container Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Bypass the Container</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' book was published in April 2004 — the same year Spring reached its 1.0 release, and three years before Guice. DI containers as a dominant Java pattern were still on the horizon. The dependency type this page describes — <em>a class that can only be instantiated by the container</em> — didn't exist widely enough to name. The fix, though, is pure Feathers: apply <em>Parameterize Constructor</em> rigorously, so the container is no longer load-bearing for tests.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>DI container dependency</strong> exists when a class is structured in a way that assumes a dependency-injection framework (Spring, Guice, CDI, Dagger) will do the wiring. The class uses <code>@Autowired</code> on fields, requires the container to resolve <code>@PostConstruct</code> hooks, relies on container-managed proxies for <code>@Transactional</code> or <code>@Async</code> behavior, or receives configuration through <code>@Value</code> annotations with no constructor path. Tests that want to exercise the class have to stand up the container itself — often the full application context — to get anything done.</p>
+
+<p>The problem isn't the container; containers are genuinely useful for production wiring. The problem is that the class's design has become <em>container-coupled</em> — the container isn't an optional wiring convenience, it's a structural prerequisite. Once that's true, the fast feedback loop of unit testing is replaced by the slow feedback loop of integration testing.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Container startup is seconds, not milliseconds</h4>
+
+<p>Booting a Spring application context — even a minimal slice — takes several seconds: classpath scanning, bean definition parsing, proxy generation, lifecycle hooks. A test suite of five hundred "unit" tests that each boot a context spends most of its time in startup. TDD's rapid red-green loop collapses into a wait-and-check ritual.</p>
+
+<h4>One test instantiates a graph of beans</h4>
+
+<p>A class with three <code>@Autowired</code> dependencies, each of which has its own dependencies, can't be constructed in isolation. The container tries to satisfy the whole graph. Even with <code>@MockBean</code> to short-circuit pieces, the test is effectively integration-testing the container's wiring logic alongside the class's own behavior.</p>
+
+<h4>Field injection hides the contract</h4>
+
+<p>A class with <code>@Autowired private UserRepository repo</code> and no matching constructor tells callers nothing about what it needs. Discovering the real dependencies requires reading the source, not the signature. Tests can't supply alternatives without reflection tricks or dedicated test frameworks.</p>
+
+<h4>@PostConstruct and proxy magic</h4>
+
+<p>Lifecycle annotations run automatically when the container instantiates a bean. A test that constructs the class with <code>new</code> skips those hooks and gets a partially-initialized object. Similarly, AOP proxies (for <code>@Transactional</code>, <code>@Async</code>, <code>@Cacheable</code>) are created by the container — calling the class directly bypasses them, which may make tests behave differently from production.</p>
+
+<h4>Test doubles require the container too</h4>
+
+<p><code>@MockBean</code> and <code>@TestConfiguration</code> only work when the container is running. That couples the test to the framework at yet another layer. Swapping Spring for a different DI tool would rewrite not just production wiring but the entire test suite.</p>
+
+<hr>
+
+<h2>The technique: Bypass the Container</h2>
+
+<p><strong>Bypass the Container</strong> is a design discipline, applied mechanically: <em>every</em> dependency of the class becomes a constructor parameter. No <code>@Autowired</code> on fields, no setter injection, no <code>@Value</code> without a constructor path. The container still wires production — modern Spring does constructor-parameter autowiring without any annotations on the constructor — but the class's <em>structure</em> no longer depends on the container. Tests construct the class with <code>new</code>, pass fakes, and exercise behavior without booting anything.</p>
+
+<p>The class's public shape now says what it needs. Its tests say so too. The container becomes what it was supposed to be: a convenient production-wiring tool, not a framework requirement.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A class uses field injection, setter injection, or container-managed lifecycle hooks.</li>
+  <li>Tests of the class require booting the DI container.</li>
+  <li>You can modify the class to take its dependencies through a constructor.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class genuinely exists only for container-managed behavior — a <code>@Configuration</code> class, a <code>@Component</code> that's really just a bean-definition holder. Test these at integration level, not unit level.</li>
+  <li>The class relies on container proxies (<code>@Transactional</code>, <code>@Async</code>) that are the point of the class's existence. Test the <em>non-proxied</em> logic as a unit and write a small integration test for the proxy behavior.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>UserService</code> uses field injection throughout:</p>
+
+<pre><code><span class="ann">@Service</span>
+<span class="kw">public class</span> <span class="type">UserService</span> {
+    <span class="ann">@Autowired</span> <span class="kw">private</span> <span class="type">UserRepository</span> repo;
+    <span class="ann">@Autowired</span> <span class="kw">private</span> <span class="type">EmailService</span> email;
+    <span class="ann">@Autowired</span> <span class="kw">private</span> <span class="type">AuditLogger</span> audit;
+    <span class="ann">@Value</span>(<span class="str">"${welcome.subject}"</span>) <span class="kw">private</span> <span class="type">String</span> welcomeSubject;
+
+    <span class="ann">@PostConstruct</span>
+    <span class="kw">public void</span> <span class="fn">init</span>() { audit.record(<span class="str">"UserService ready"</span>); }
+
+    <span class="kw">public</span> <span class="type">User</span> <span class="fn">register</span>(<span class="type">String</span> name, <span class="type">String</span> emailAddress) {
+        <span class="kw">if</span> (repo.findByEmail(emailAddress).isPresent()) {
+            <span class="kw">throw new</span> <span class="type">UserAlreadyExistsException</span>();
+        }
+        <span class="type">User</span> user = repo.save(<span class="kw">new</span> <span class="type">User</span>(name, emailAddress));
+        email.send(emailAddress, welcomeSubject, <span class="str">"Welcome, "</span> + name);
+        audit.record(<span class="str">"registered:"</span> + user.getId());
+        <span class="kw">return</span> user;
+    }
+}</code></pre>
+
+<p>Testing <code>register</code> requires a Spring context — or reflection hacks to set the private fields. <code>@SpringBootTest</code> works but boots the whole application; <code>@MockBean</code> helps but ties the test to the framework. Either way, the test is slow and structurally coupled to Spring.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Remove <code>@Autowired</code> from fields. Make each field <code>private final</code>.</li>
+  <li>Remove <code>@Value</code> from fields. Each configuration value becomes a constructor parameter (typed as <code>String</code>, <code>int</code>, or a small value object).</li>
+  <li>Add a single constructor taking all dependencies and configuration values. Modern Spring auto-wires a single public constructor without needing <code>@Autowired</code>.</li>
+  <li>Replace <code>@PostConstruct</code> logic either by moving it into the constructor (if simple) or by keeping the annotation and acknowledging that unit tests won't trigger it (and aren't meant to — test it separately if it matters).</li>
+  <li>Verify production still wires up — usually no extra work if Spring is recent (5.x+).</li>
+  <li>Write tests that construct the class with <code>new</code> and pass hand-written fakes.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="ann">@Service</span>
+<span class="kw">public class</span> <span class="type">UserService</span> {
+    <span class="kw">private final</span> <span class="type">UserRepository</span> repo;
+    <span class="kw">private final</span> <span class="type">EmailService</span> email;
+    <span class="kw">private final</span> <span class="type">AuditLogger</span> audit;
+    <span class="kw">private final</span> <span class="type">String</span> welcomeSubject;
+
+    <span class="kw">public</span> <span class="fn">UserService</span>(<span class="type">UserRepository</span> repo,
+                       <span class="type">EmailService</span> email,
+                       <span class="type">AuditLogger</span> audit,
+                       <span class="ann">@Value</span>(<span class="str">"${welcome.subject}"</span>) <span class="type">String</span> welcomeSubject) {
+        <span class="kw">this</span>.repo = repo;
+        <span class="kw">this</span>.email = email;
+        <span class="kw">this</span>.audit = audit;
+        <span class="kw">this</span>.welcomeSubject = welcomeSubject;
+    }
+
+    <span class="kw">public</span> <span class="type">User</span> <span class="fn">register</span>(<span class="type">String</span> name, <span class="type">String</span> emailAddress) {
+        <span class="kw">if</span> (repo.findByEmail(emailAddress).isPresent()) {
+            <span class="kw">throw new</span> <span class="type">UserAlreadyExistsException</span>();
+        }
+        <span class="type">User</span> user = repo.save(<span class="kw">new</span> <span class="type">User</span>(name, emailAddress));
+        email.send(emailAddress, welcomeSubject, <span class="str">"Welcome, "</span> + name);
+        audit.record(<span class="str">"registered:"</span> + user.getId());
+        <span class="kw">return</span> user;
+    }
+}
+
+<span class="cmt">// Test — no Spring, no container, millisecond runtime</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">registerCreatesUserAndSendsWelcome</span>() {
+    <span class="type">FakeUserRepository</span> repo = <span class="kw">new</span> <span class="type">FakeUserRepository</span>();
+    <span class="type">FakeEmailService</span> email = <span class="kw">new</span> <span class="type">FakeEmailService</span>();
+    <span class="type">FakeAuditLogger</span> audit = <span class="kw">new</span> <span class="type">FakeAuditLogger</span>();
+
+    <span class="type">UserService</span> svc = <span class="kw">new</span> <span class="type">UserService</span>(repo, email, audit, <span class="str">"Welcome!"</span>);
+    <span class="type">User</span> user = svc.register(<span class="str">"Alice"</span>, <span class="str">"a@b.com"</span>);
+
+    <span class="fn">assertEquals</span>(<span class="str">"Alice"</span>, user.getName());
+    <span class="fn">assertEquals</span>(<span class="str">"a@b.com"</span>, email.lastRecipient);
+    <span class="fn">assertEquals</span>(<span class="str">"Welcome!"</span>, email.lastSubject);
+    <span class="fn">assertTrue</span>(audit.lastEntry.startsWith(<span class="str">"registered:"</span>));
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">registerRejectsDuplicateEmail</span>() {
+    <span class="type">FakeUserRepository</span> repo = <span class="kw">new</span> <span class="type">FakeUserRepository</span>();
+    repo.save(<span class="kw">new</span> <span class="type">User</span>(<span class="str">"Existing"</span>, <span class="str">"a@b.com"</span>));
+
+    <span class="type">UserService</span> svc = <span class="kw">new</span> <span class="type">UserService</span>(repo, <span class="kw">new</span> <span class="type">FakeEmailService</span>(),
+                                         <span class="kw">new</span> <span class="type">FakeAuditLogger</span>(), <span class="str">"Welcome!"</span>);
+
+    <span class="fn">assertThrows</span>(<span class="type">UserAlreadyExistsException</span>.<span class="kw">class</span>,
+        () -&gt; svc.register(<span class="str">"Alice"</span>, <span class="str">"a@b.com"</span>));
+}</code></pre>
+
+<p>Spring still works in production — it sees the single constructor and autowires each parameter against the bean graph, and the <code>@Value</code> placeholder still resolves. Tests no longer need any of that.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Parameterize Constructor (the Ch 25 root)</h4>
+
+<p>This entire page is an application of Feathers' <em>Parameterize Constructor</em> technique to the specific case of container-managed classes. The only thing new is recognizing that DI containers can inadvertently push codebases <em>away</em> from Parameterize Constructor (by making field injection look equally convenient), and that dragging them back is a small act of discipline.</p>
+
+<h4>Separate proxy-dependent behavior into a wrapper</h4>
+
+<p>If a method genuinely needs <code>@Transactional</code> or <code>@Async</code> proxy behavior that only the container can provide, split the class: the core logic goes into a class with plain methods (fully unit-testable), and a thin wrapper applies the annotation. The wrapper is tested as a small integration test; the core is tested as a normal unit.</p>
+
+<h4>Constructor-based integration tests when needed</h4>
+
+<p>Some behavior only emerges from the wired-up application: transaction boundaries, security filters, autoconfiguration. Keep a small number of integration tests for these — but keep them a minority. Most classes should have plain unit tests with constructor-injected fakes, and a few focused integration tests verify the container actually wires everything correctly.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Many-parameter constructors are a smell</h4>
+
+<p>If removing field injection leaves you with a constructor taking nine parameters, the class has too many responsibilities — the container was hiding the coupling. Fix by splitting: multiple smaller classes, each with fewer parameters. The refactor is driven by the discomfort of the parameter count, which is the point.</p>
+
+<h4>@Value at the constructor works, but prefer typed objects</h4>
+
+<p>Taking <code>@Value("${port}") int port</code> in a constructor is fine for isolated configuration. Once the class takes more than two configuration values, consider a typed <code>@ConfigurationProperties</code> object instead — the class receives a small properties bean rather than a grab bag of primitives. Tests construct the bean directly.</p>
+
+<h4>Don't disable the container — replace it in tests</h4>
+
+<p>The goal isn't to avoid Spring/Guice — they're fine in production. The goal is to make tests <em>not require</em> them. Production can still use all the container's features. Tests construct the class directly and pass fakes, because they can.</p>
+
+<h4>Migrating field-injected code takes time</h4>
+
+<p>A legacy codebase with thousands of <code>@Autowired</code> field injections is a lot of work to migrate. The rewrite is mechanical (IDE tools help), but it's also tedious and touches many files. Do it incrementally — when you'd touch a class anyway for a feature, convert its injection style at the same time. Greenfield code uses constructor injection from the start.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameterize Constructor</em> is the Ch 25 technique this page instantiates. The <em>Constructor Dependency</em> pairing page covers the general case where a class creates its own collaborators; DI Container Dependency is the variant where the container creates them and the class collaborates passively.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific context (DI containers as dominant Java frameworks) is post-2004.
+</footer>
+
+</body>
+</html>

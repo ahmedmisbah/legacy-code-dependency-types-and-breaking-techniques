@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reflection-Based Dependency → Wrap the Reflective Call</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Reflection-Based Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Wrap the Reflective Call</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Reflection-Based Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Wrap the Reflective Call</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' catalog treats reflection by implication: the static calls (<code>Class.forName</code>, <code>Method.invoke</code>, <code>Proxy.newProxyInstance</code>) are a flavor of global reference, and the fix — <em>Extract and Override Call</em> — applies. What isn't in the book is specific guidance for reflective code, which has its own peculiarities: class-loading side effects, checked exceptions that ripple through signatures, results typed as <code>Object</code>, and dynamic proxy creation at runtime. Treat this pairing as Feathers' technique applied deliberately to reflection's particular shape.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>reflection-based dependency</strong> exists when code uses Java's reflection API to inspect or invoke types at runtime — typically <code>Class.forName(name)</code>, <code>class.getMethod(...).invoke(...)</code>, <code>Constructor.newInstance(...)</code>, <code>Proxy.newProxyInstance(...)</code>, annotation-processor APIs, or service-loader-style dynamic discovery. The reflective call is a global (it reaches into the classloader's world to find a type by name) and a side-effect (class loading runs static initializers), rolled into one.</p>
+
+<p>Common shapes: plugin systems that load user classes by name; serialization libraries that construct DTOs from JSON via reflection; framework bootstrap code that scans the classpath for annotated types; migration tools that fall back to reflective field access when getters don't exist. Any of these makes the containing class depend not on a compile-time type but on the runtime classloader state — which tests have very little control over.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The classloader is a global</h4>
+
+<p><code>Class.forName("com.example.Plugin")</code> looks up the class in a classloader that's shared across the whole JVM (or at least the whole test run). If the class doesn't exist in the classpath, the call fails. If it exists but its static initializer has side effects, those side effects happen during the test. Neither is controllable from within a single test without classloader surgery.</p>
+
+<h4>Reflective invocations have surprising error paths</h4>
+
+<p><code>Method.invoke</code> wraps any exception thrown by the target in <code>InvocationTargetException</code>. <code>Constructor.newInstance</code> adds <code>InstantiationException</code> and <code>IllegalAccessException</code>. Test assertions about "what exception was thrown" have to navigate the wrapping, and unwrapping requires understanding of how reflection exposes failures. Accidental assertions on the wrong exception type pass tests that miss real bugs.</p>
+
+<h4>Results are typed <code>Object</code></h4>
+
+<p>Reflective invocation returns <code>Object</code>. The surrounding code casts. Tests that try to stub reflection must return plausibly-typed values, or the cast blows up. A mock that returns <code>null</code> (default for unstubbed methods) often gets through the reflection layer and fails later at a cast, far from the test's actual intent.</p>
+
+<h4>Proxy-based code is especially opaque</h4>
+
+<p>Code that uses <code>Proxy.newProxyInstance</code> to create runtime implementations of interfaces (JDK dynamic proxies, bytecode libraries like Byte Buddy) produces classes that don't exist in your source tree. Tests can observe their behavior but can't step through them in a debugger without understanding the proxy's internal dispatching.</p>
+
+<hr>
+
+<h2>The technique: Wrap the Reflective Call</h2>
+
+<p><strong>Wrap the Reflective Call</strong> is <em>Extract and Override Call</em> from Feathers' Ch 25, applied deliberately to reflection's specific shape. The reflective call — ideally just one line — moves into its own <code>protected</code> method whose signature uses concrete types (the kind of object the caller wants, not <code>Object</code>). The method body performs the reflection and casts on the way out. Test subclasses override the method to return a canned instance, bypassing reflection entirely.</p>
+
+<p>The wrapping buys two things at once: it gives the test a seam, and it concentrates the reflection's type erasure into one well-documented place. The rest of the class can work with typed values, unaware that reflection is happening behind the scenes.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Code uses reflection to load, construct, or invoke types identified by name or by annotation.</li>
+  <li>Tests need to verify behavior without depending on specific classes existing on the classpath.</li>
+  <li>The class isn't <code>final</code> and a test subclass is feasible.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The reflection <em>is</em> the class's purpose — a plugin loader, an annotation processor — in which case testing means loading real test fixtures via the same mechanism. Small targeted fixtures, not mocking, is the right tool.</li>
+  <li>The reflection is used only to work around an access modifier (calling a private method from outside its class). Fix the access modifier; don't wrap the reflection.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>PluginLauncher</code> loads and instantiates plugins by class name:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PluginLauncher</span> {
+    <span class="kw">public</span> <span class="type">PluginResult</span> <span class="fn">launch</span>(<span class="type">String</span> pluginClass, <span class="type">PluginConfig</span> config) {
+        <span class="kw">try</span> {
+            <span class="type">Class</span>&lt;?&gt; cls = <span class="type">Class</span>.forName(pluginClass);
+            <span class="type">Plugin</span> plugin = (<span class="type">Plugin</span>) cls.getDeclaredConstructor().newInstance();
+            plugin.configure(config);
+            <span class="kw">return</span> plugin.run();
+        } <span class="kw">catch</span> (<span class="type">ReflectiveOperationException</span> e) {
+            <span class="kw">throw new</span> <span class="type">PluginStartupFailed</span>(pluginClass, e);
+        }
+    }
+}</code></pre>
+
+<p>Testing <code>launch</code>'s happy path requires a real plugin class on the classpath. Testing error paths requires arranging specific failure modes (non-existent class, class with a private constructor, class that throws from its constructor) — each of which means writing a dedicated fixture class. The test surface is wide and the test classes are numerous.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the reflective call. Here it's the whole <code>Class.forName &rarr; newInstance</code> sequence, which together produce a <code>Plugin</code>.</li>
+  <li>Extract it into a <code>protected</code> method with a signature typed to the caller's needs: <code>protected Plugin loadPlugin(String className)</code>.</li>
+  <li>The method body keeps the reflection; the caller's code above it sees only typed values.</li>
+  <li>Translate checked reflection exceptions into a domain exception inside the method — callers shouldn't see <code>ReflectiveOperationException</code>.</li>
+  <li>In tests, subclass and override <code>loadPlugin</code> to return a pre-constructed fake plugin instance.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">PluginLauncher</span> {
+    <span class="kw">public</span> <span class="type">PluginResult</span> <span class="fn">launch</span>(<span class="type">String</span> pluginClass, <span class="type">PluginConfig</span> config) {
+        <span class="type">Plugin</span> plugin = loadPlugin(pluginClass);
+        plugin.configure(config);
+        <span class="kw">return</span> plugin.run();
+    }
+
+    <span class="kw">protected</span> <span class="type">Plugin</span> <span class="fn">loadPlugin</span>(<span class="type">String</span> className) {
+        <span class="kw">try</span> {
+            <span class="type">Class</span>&lt;?&gt; cls = <span class="type">Class</span>.forName(className);
+            <span class="kw">return</span> (<span class="type">Plugin</span>) cls.getDeclaredConstructor().newInstance();
+        } <span class="kw">catch</span> (<span class="type">ReflectiveOperationException</span> e) {
+            <span class="kw">throw new</span> <span class="type">PluginStartupFailed</span>(className, e);
+        }
+    }
+}
+
+<span class="cmt">// Test subclass — overrides the reflection seam with a fake plugin</span>
+<span class="kw">class</span> <span class="type">TestPluginLauncher</span> <span class="kw">extends</span> <span class="type">PluginLauncher</span> {
+    <span class="kw">public</span> <span class="type">String</span> lastLoadedName;
+    <span class="kw">private</span> <span class="type">Plugin</span> nextPlugin;
+    <span class="kw">private</span> <span class="type">PluginStartupFailed</span> nextError;
+
+    <span class="kw">public void</span> <span class="fn">willReturn</span>(<span class="type">Plugin</span> p) { <span class="kw">this</span>.nextPlugin = p; <span class="kw">this</span>.nextError = <span class="kw">null</span>; }
+    <span class="kw">public void</span> <span class="fn">willFailWith</span>(<span class="type">PluginStartupFailed</span> e) { <span class="kw">this</span>.nextError = e; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected</span> <span class="type">Plugin</span> <span class="fn">loadPlugin</span>(<span class="type">String</span> className) {
+        <span class="kw">this</span>.lastLoadedName = className;
+        <span class="kw">if</span> (nextError != <span class="kw">null</span>) <span class="kw">throw</span> nextError;
+        <span class="kw">return</span> nextPlugin;
+    }
+}
+
+<span class="cmt">// Minimal fake plugin for tests</span>
+<span class="kw">class</span> <span class="type">FakePlugin</span> <span class="kw">implements</span> <span class="type">Plugin</span> {
+    <span class="kw">public</span> <span class="type">PluginConfig</span> configured;
+    <span class="kw">private</span> <span class="type">PluginResult</span> result = <span class="type">PluginResult</span>.ok();
+    <span class="kw">public void</span> <span class="fn">willReturn</span>(<span class="type">PluginResult</span> r) { <span class="kw">this</span>.result = r; }
+
+    <span class="ann">@Override</span> <span class="kw">public void</span> <span class="fn">configure</span>(<span class="type">PluginConfig</span> c) { <span class="kw">this</span>.configured = c; }
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">PluginResult</span> <span class="fn">run</span>() { <span class="kw">return</span> result; }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">launchConfiguresPluginBeforeRunning</span>() {
+    <span class="type">FakePlugin</span> plugin = <span class="kw">new</span> <span class="type">FakePlugin</span>();
+    <span class="type">TestPluginLauncher</span> launcher = <span class="kw">new</span> <span class="type">TestPluginLauncher</span>();
+    launcher.willReturn(plugin);
+
+    <span class="type">PluginConfig</span> cfg = <span class="type">PluginConfig</span>.withKey(<span class="str">"timeout"</span>, <span class="str">"30s"</span>);
+    launcher.launch(<span class="str">"com.example.Irrelevant"</span>, cfg);
+
+    <span class="fn">assertSame</span>(cfg, plugin.configured);
+    <span class="fn">assertEquals</span>(<span class="str">"com.example.Irrelevant"</span>, launcher.lastLoadedName);
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">launchPropagatesStartupFailures</span>() {
+    <span class="type">TestPluginLauncher</span> launcher = <span class="kw">new</span> <span class="type">TestPluginLauncher</span>();
+    launcher.willFailWith(<span class="kw">new</span> <span class="type">PluginStartupFailed</span>(<span class="str">"com.bad"</span>, <span class="kw">new</span> <span class="type">ClassNotFoundException</span>()));
+
+    <span class="fn">assertThrows</span>(<span class="type">PluginStartupFailed</span>.<span class="kw">class</span>,
+        () -&gt; launcher.launch(<span class="str">"com.bad"</span>, <span class="type">PluginConfig</span>.empty()));
+}</code></pre>
+
+<p>No real plugin classes exist in the test. No reflection runs. The launcher's coordination logic — load, configure, run, handle failure — is tested with ordinary objects, and the reflection-specific code path is the one-method seam that stays production-only.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract a dedicated loader class</h4>
+
+<p>When multiple classes in your codebase do reflective work, consolidate. A single <code>ClassLoader</code>-wrapper class owns all the reflection; every caller takes it as a constructor parameter. Production uses the real one; tests implement a fake loader that returns whatever objects the test wants. This is <em>Encapsulate Global References</em> applied to reflection specifically.</p>
+
+<pre><code><span class="kw">public interface</span> <span class="type">ClassLoader</span> {
+    &lt;<span class="type">T</span>&gt; <span class="type">T</span> <span class="fn">loadAndInstantiate</span>(<span class="type">String</span> name, <span class="type">Class</span>&lt;<span class="type">T</span>&gt; expectedType);
+}
+
+<span class="kw">public class</span> <span class="type">PluginLauncher</span> {
+    <span class="kw">private final</span> <span class="type">ClassLoader</span> loader;
+    <span class="kw">public</span> <span class="fn">PluginLauncher</span>(<span class="type">ClassLoader</span> l) { <span class="kw">this</span>.loader = l; }
+
+    <span class="kw">public</span> <span class="type">PluginResult</span> <span class="fn">launch</span>(<span class="type">String</span> pluginClass, <span class="type">PluginConfig</span> config) {
+        <span class="type">Plugin</span> plugin = loader.loadAndInstantiate(pluginClass, <span class="type">Plugin</span>.<span class="kw">class</span>);
+        plugin.configure(config);
+        <span class="kw">return</span> plugin.run();
+    }
+}</code></pre>
+
+<h4>Real fixtures for plugin-loader-like tests</h4>
+
+<p>Sometimes the reflective call is the point. A test for <em>"the launcher correctly handles a plugin whose constructor throws"</em> might want an actual class that throws from its constructor, on the real classpath, loaded by real reflection. Write a small test-fixture class and let the test exercise the real path. Reserve the wrapping technique for the orchestration code around the reflective call — the code that decides <em>what</em> to load and <em>when</em> — and test the reflection itself separately with fixtures.</p>
+
+<h4>ServiceLoader for discoverable plugins</h4>
+
+<p>Not a testing technique, but worth noting: if reflection is being used to implement a plugin-discovery system, the JDK's <code>java.util.ServiceLoader</code> exists for exactly that. It's still reflection under the hood, but its API is well-defined and it integrates with module systems. Testing is still about the orchestration, not <code>ServiceLoader</code> itself.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't swallow reflection exceptions silently</h4>
+
+<p>When the wrapping method translates <code>ReflectiveOperationException</code> to a domain exception, the domain exception should carry the original as its cause. Debugging a production reflection failure without the original stack is misery. Always use the two-argument exception constructor that takes a <code>Throwable cause</code>.</p>
+
+<h4>Classes loaded for side effects are untestable through this seam</h4>
+
+<p>Some code uses <code>Class.forName("com.example.Driver")</code> specifically to trigger the class's static initializer (the old JDBC driver-loading pattern). The wrapping technique gives the test no way to simulate the static initializer running. In those cases, the reflection usage itself is a sign of a legacy pattern — look for a post-1990s alternative (<code>ServiceLoader</code>, explicit factory, DI container) rather than testing around it.</p>
+
+<h4>Generics and reflection don't mix well</h4>
+
+<p>The wrapping method's signature will usually have to be parameterized (<code>&lt;T&gt; T load(String name, Class&lt;T&gt; type)</code>) to preserve type information across the reflection. Reflection erases parameterized types — <code>List&lt;String&gt;.class</code> doesn't exist — so if the loaded objects are parameterized, the <code>Class</code> token is only the raw type. Document this limitation; don't pretend it's been solved.</p>
+
+<h4>Keep the seam tight</h4>
+
+<p>The extracted method should do just the reflection. Don't let it grow into a general plugin-management method with logging, caching, or retry. Keep it a seam; everything else stays in callable Java code where normal testability applies.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Extract and Override Call</em> is the Ch 25 technique this page's fix instantiates. <em>Encapsulate Global References</em> is the deeper principle — the classloader is a global, and wrapping reflection makes that explicit.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, with the technique being his <em>Extract and Override Call</em> applied to reflection's specific shape.
+</footer>
+
+</body>
+</html>

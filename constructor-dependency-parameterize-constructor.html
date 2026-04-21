@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Constructor Dependency → Parameterize Constructor</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Constructor Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Parameterize Constructor</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Constructor Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Parameterize Constructor</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>constructor dependency</strong> appears when a class instantiates its own collaborators directly inside its constructor using <code>new</code>. The collaborator is sealed in at construction time — no outside caller can choose a different one, and no test can substitute a fake. If the collaborator talks to a real database, spawns a thread pool, opens a socket, or reads from the filesystem, the class it belongs to inherits all of those behaviors whether you want them in a test or not.</p>
+
+<p>In Java this pattern is so common it's almost invisible. A field declared and initialized at the declaration site (<code>private final Logger log = LoggerFactory.getLogger(...)</code>) is a constructor dependency. A <code>new</code> call in the constructor body is a constructor dependency. A static factory call like <code>DbConnection.get()</code> inside the constructor is a constructor dependency. The class owns its collaborators, which sounds tidy until you try to write a test.</p>
+
+<div class="note">
+<strong>Why it's worth naming.</strong> Constructor dependencies are Feathers' <em>hidden dependency</em> case at its most literal: the wiring is buried inside construction logic, invisible to anyone reading the class's public API. You can't see what the class depends on without opening its source and reading the constructor body.
+</div>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<p>Constructor dependencies are especially hostile to testing because they defeat both halves of Feathers' <em>sensing</em> and <em>separation</em> problem at the same time. You can't run the class without also running its collaborators, and you can't observe what the class did to them. Every specific pain below is a consequence of one or the other.</p>
+
+<h4>You can't substitute (the separation failure)</h4>
+
+<p>The <code>new</code> call inside the constructor isn't a choice — it's a fact. Every time a test writes <code>new OrderService()</code>, a real <code>SmtpEmailSender</code> and a real <code>InventoryClient</code> spring into existence along with it. There is no place to intervene. A test that was supposed to verify a small piece of ordering logic ends up exercising the mail server and the database, whether the test author wanted that or not.</p>
+
+<h4>You can't observe (the sensing failure)</h4>
+
+<p>Even if the real collaborators happen to work in the test environment, the test has no handle on them. It can't ask the email sender <em>"were you called, and with what arguments?"</em> because that object is sealed inside the class. The only signal you can check is downstream side effects — a real inbox, a real row in the database — which requires the real infrastructure and brings back every problem from the first point.</p>
+
+<h4>The constructor might refuse to run at all</h4>
+
+<p>If the environment isn't right — SMTP host unreachable, database credentials missing, configuration file absent — the constructor throws before the test can do anything useful. A class that can't be instantiated can't be tested. This is how legacy codebases end up with no unit tests at all: the entry-point classes require half of production to spin up, so nobody even tries.</p>
+
+<h4>Determinism and speed collapse together</h4>
+
+<p>Calls like <code>Clock.systemUTC()</code> or <code>UUID.randomUUID()</code> embedded in the constructor make every test run slightly different. A test that asserts on a timestamp can never be stable. And because each test drags real I/O-backed collaborators into existence, microsecond-scale unit tests become second-scale integration tests — which discourages running them often, which defeats the point of having tests in the first place.</p>
+
+<h4>Error paths become nearly untestable</h4>
+
+<p>Testing <em>"what happens when the payment processor declines?"</em> means causing a real decline against a real gateway, which means test cards, sandbox accounts, and flaky networks. Testing <em>"what happens when the database is down?"</em> means somehow bringing the database down during a test run. With a real collaborator welded in place, every failure mode of every collaborator is out of reach — which means the most important paths in the code, the ones that handle things going wrong, are the least tested.</p>
+
+<h4>The dependency is invisible at the API</h4>
+
+<p>A reader looking at <code>OrderService</code>'s public surface sees a class with a no-argument constructor and naturally concludes it's self-contained. The fact that it needs a working SMTP server, a reachable database, and a system clock surfaces only at runtime — often in production, as a stack trace from a deployment that forgot to set an environment variable. Constructor dependencies don't just block tests; they hide the shape of the system from everyone who reads the code.</p>
+
+<div class="note">
+<strong>Connecting back.</strong> Every technique in the rest of this page attacks one or both halves of the sensing/separation problem. Parameterize Constructor gives the test a way to <em>substitute</em> the collaborator (separation) <em>and</em> a reference to hold on to afterwards (sensing). That's why it's the default fix for this dependency type — one move solves both problems.
+</div>
+
+<hr>
+
+<h2>The technique: Parameterize Constructor</h2>
+
+<p><strong>Parameterize Constructor</strong> lifts the <code>new</code> call out of the constructor and turns it into a parameter. The class no longer decides which collaborator it uses — the caller does. In production, the caller passes in the real implementation. In a test, the caller passes in a fake. The class itself doesn't know or care which is which.</p>
+
+<p>This is the simplest and most widely applicable technique in Feathers' catalog for Java code. It's also the technique that modern Java conventions (constructor injection, Spring, Guice, Dagger) have quietly institutionalised — applying it by hand is exactly what a DI container does automatically.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>The constructor contains one or more <code>new SomeThing()</code> calls where <code>SomeThing</code> is painful or impossible to use in a test.</li>
+  <li>You own the source of the class and can change its constructor.</li>
+  <li>The set of callers is either small, or you're willing to keep a convenience constructor for ones you can't update.</li>
+  <li>You want injection without pulling in a full DI framework just to break this one dependency.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>When the dependency is so entangled with other constructor logic that cleanly extracting it is risky — consider <em>Extract and Override Factory Method</em> instead, which leaves construction alone and intercepts creation through a protected method.</li>
+  <li>When changing the constructor signature would break a large number of callers you don't control — keep the old constructor as a convenience overload that delegates to the new one.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>OrderService</code> hard-codes its collaborators in the constructor. Nothing outside the class can redirect them:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private final</span> <span class="type">EmailSender</span> emailSender;
+    <span class="kw">private final</span> <span class="type">InventoryClient</span> inventory;
+    <span class="kw">private final</span> <span class="type">Clock</span> clock;
+
+    <span class="kw">public</span> <span class="fn">OrderService</span>() {
+        <span class="kw">this</span>.emailSender = <span class="kw">new</span> <span class="type">SmtpEmailSender</span>(<span class="type">System</span>.getenv(<span class="str">"SMTP_HOST"</span>));
+        <span class="kw">this</span>.inventory = <span class="kw">new</span> <span class="type">InventoryClient</span>(<span class="type">DbConnection</span>.get());
+        <span class="kw">this</span>.clock = <span class="type">Clock</span>.systemUTC();
+    }
+
+    <span class="kw">public</span> <span class="type">Receipt</span> <span class="fn">placeOrder</span>(<span class="type">Order</span> order) {
+        inventory.reserve(order.getItems());
+        emailSender.sendConfirmation(order.getCustomer(), order);
+        <span class="kw">return new</span> <span class="type">Receipt</span>(order, clock.instant());
+    }
+}</code></pre>
+
+<p>Any test of <code>placeOrder</code> is actually a test of SMTP configuration, database connectivity, and the wall clock. The class appears to take no dependencies — its no-argument constructor is a polite lie.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<p>Feathers' sequence is designed to preserve existing behavior while opening the door to injection. Work one collaborator at a time:</p>
+
+<ol class="steps">
+  <li>Identify the collaborator you want to pull out — one <code>new</code> call in the constructor.</li>
+  <li>Add a parameter of the collaborator's type to the constructor, matching the field's declared type. Preserve all other parameters and their order exactly (Feathers' <em>Preserve Signatures</em> rule).</li>
+  <li>In the constructor body, replace the <code>new</code> call with a simple assignment from the new parameter.</li>
+  <li>Update callers to pass in the real implementation. If you can't update every caller, keep a no-arg convenience constructor that delegates to the new one using <code>this(...)</code>.</li>
+  <li>Repeat for each remaining collaborator until the constructor does nothing but assign incoming parameters to fields.</li>
+  <li>In tests, instantiate the class with fake implementations.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<p class="before-after">After — collaborators are injected, and a convenience constructor preserves the old signature for legacy callers:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private final</span> <span class="type">EmailSender</span> emailSender;
+    <span class="kw">private final</span> <span class="type">InventoryClient</span> inventory;
+    <span class="kw">private final</span> <span class="type">Clock</span> clock;
+
+    <span class="cmt">// Parameterized constructor — this is the one tests and new callers use</span>
+    <span class="kw">public</span> <span class="fn">OrderService</span>(<span class="type">EmailSender</span> emailSender,
+                        <span class="type">InventoryClient</span> inventory,
+                        <span class="type">Clock</span> clock) {
+        <span class="kw">this</span>.emailSender = emailSender;
+        <span class="kw">this</span>.inventory = inventory;
+        <span class="kw">this</span>.clock = clock;
+    }
+
+    <span class="cmt">// Convenience constructor — preserves the old no-arg signature</span>
+    <span class="cmt">// so callers that haven't been updated still work.</span>
+    <span class="kw">public</span> <span class="fn">OrderService</span>() {
+        <span class="kw">this</span>(<span class="kw">new</span> <span class="type">SmtpEmailSender</span>(<span class="type">System</span>.getenv(<span class="str">"SMTP_HOST"</span>)),
+             <span class="kw">new</span> <span class="type">InventoryClient</span>(<span class="type">DbConnection</span>.get()),
+             <span class="type">Clock</span>.systemUTC());
+    }
+
+    <span class="kw">public</span> <span class="type">Receipt</span> <span class="fn">placeOrder</span>(<span class="type">Order</span> order) {
+        inventory.reserve(order.getItems());
+        emailSender.sendConfirmation(order.getCustomer(), order);
+        <span class="kw">return new</span> <span class="type">Receipt</span>(order, clock.instant());
+    }
+}</code></pre>
+
+<p>Now the test has somewhere to plug in:</p>
+
+<pre><code><span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">placeOrderReservesInventoryAndEmailsConfirmation</span>() {
+    <span class="type">FakeEmailSender</span> email = <span class="kw">new</span> <span class="type">FakeEmailSender</span>();
+    <span class="type">FakeInventory</span> inv = <span class="kw">new</span> <span class="type">FakeInventory</span>();
+    <span class="type">Clock</span> fixed = <span class="type">Clock</span>.fixed(<span class="type">Instant</span>.parse(<span class="str">"2026-01-01T00:00:00Z"</span>), <span class="type">ZoneOffset</span>.UTC);
+
+    <span class="type">OrderService</span> service = <span class="kw">new</span> <span class="type">OrderService</span>(email, inv, fixed);
+    <span class="type">Receipt</span> receipt = service.placeOrder(<span class="type">Order</span>.sample());
+
+    <span class="fn">assertTrue</span>(inv.reserveWasCalled);
+    <span class="fn">assertEquals</span>(<span class="str">"jane@example.com"</span>, email.lastRecipient);
+    <span class="fn">assertEquals</span>(<span class="type">Instant</span>.parse(<span class="str">"2026-01-01T00:00:00Z"</span>), receipt.getTimestamp());
+}</code></pre>
+
+<p>Notice that the clock dependency — one of the gaps we identified earlier in Feathers' catalog — falls out for free. Parameterize Constructor plus a <code>Clock</code> interface is exactly the recipe the <em>time dependency</em> row of the gap table points to.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<p>Parameterize Constructor is the first thing to try, but two situations make it awkward: a constructor that does genuinely complex creation logic (conditional branches, configuration-driven wiring, lazy setup), and a constructor you aren't allowed to change at all. Feathers gives each situation its own technique.</p>
+
+<hr>
+
+<h4>Extract and Override Factory Method</h4>
+
+<p>Use this when the constructor doesn't just call <code>new</code> — it makes <em>decisions</em> about what to create. Parameterising such a constructor forces every caller to reproduce those decisions, which is the opposite of what you want. The fix: leave the decision logic where it is, but move it into a protected method. Production behaviour is unchanged, and a test subclass can override the method to return a fake.</p>
+
+<p>Steps:</p>
+
+<ol class="steps">
+  <li>Identify the creation expression inside the constructor.</li>
+  <li>Extract it into a <code>protected</code> method with a name that describes what's being created (e.g., <code>createInventoryClient</code>).</li>
+  <li>Call the new method from the constructor.</li>
+  <li>In tests, subclass the class and override the factory method to return a fake.</li>
+</ol>
+
+<p class="before-after">Before — the constructor decides which variant of <code>InventoryClient</code> to wire up:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private final</span> <span class="type">InventoryClient</span> inventory;
+
+    <span class="kw">public</span> <span class="fn">OrderService</span>(<span class="type">Config</span> config) {
+        <span class="kw">this</span>.inventory = config.isProduction()
+            ? <span class="kw">new</span> <span class="type">InventoryClient</span>(config.dbUrl(), config.getRetries())
+            : <span class="kw">new</span> <span class="type">InventoryClient</span>(<span class="str">"memory://local"</span>, <span class="num">0</span>);
+    }
+}</code></pre>
+
+<p class="before-after">After — the decision logic moves into a protected factory method:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">OrderService</span> {
+    <span class="kw">private final</span> <span class="type">InventoryClient</span> inventory;
+
+    <span class="kw">public</span> <span class="fn">OrderService</span>(<span class="type">Config</span> config) {
+        <span class="kw">this</span>.inventory = createInventoryClient(config);
+    }
+
+    <span class="kw">protected</span> <span class="type">InventoryClient</span> <span class="fn">createInventoryClient</span>(<span class="type">Config</span> config) {
+        <span class="kw">return</span> config.isProduction()
+            ? <span class="kw">new</span> <span class="type">InventoryClient</span>(config.dbUrl(), config.getRetries())
+            : <span class="kw">new</span> <span class="type">InventoryClient</span>(<span class="str">"memory://local"</span>, <span class="num">0</span>);
+    }
+}
+
+<span class="cmt">// Test subclass — overrides creation without touching the constructor</span>
+<span class="kw">public class</span> <span class="type">TestableOrderService</span> <span class="kw">extends</span> <span class="type">OrderService</span> {
+    <span class="kw">public</span> <span class="fn">TestableOrderService</span>(<span class="type">Config</span> config) {
+        <span class="kw">super</span>(config);
+    }
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected</span> <span class="type">InventoryClient</span> <span class="fn">createInventoryClient</span>(<span class="type">Config</span> config) {
+        <span class="kw">return new</span> <span class="type">FakeInventoryClient</span>();
+    }
+}</code></pre>
+
+<div class="note">
+<strong>Initialization-order gotcha.</strong> Because the factory method is called from within the superclass constructor, it runs before any fields declared in the test subclass are initialised. That's why the override above returns a <code>new FakeInventoryClient()</code> inline rather than a field that the subclass tried to set first. If you need the fake to be configurable from the test, capture it in a <code>static</code> holder or use an overload that accepts a pre-built fake through <code>super(...)</code>.
+</div>
+
+<hr>
+
+<h4>Supersede Instance Variable</h4>
+
+<p>Use this when you truly cannot change the constructor — typically because it's inherited, overridden by reflection-based frameworks, or called from code you can't touch. The idea is to let the constructor run normally, then overwrite one of its fields from the outside afterwards. Feathers treats this as a last resort. It breaks encapsulation, leaves the real object's construction side effects in place, and invites misuse; but sometimes it's the only technique available.</p>
+
+<p>Steps:</p>
+
+<ol class="steps">
+  <li>Add a public method that assigns a new value to the instance variable.</li>
+  <li>Give it an unmistakably test-only name (Feathers' convention: <code>supersedeX</code> where <code>X</code> is the field name).</li>
+  <li>In tests, construct the object normally, then call the superseder to replace the real collaborator with a fake.</li>
+</ol>
+
+<p class="before-after">Before — a constructor you can't modify (perhaps because it's part of a framework-invoked lifecycle or a legacy entry point used by dozens of call sites):</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">LegacyOrderService</span> {
+    <span class="kw">private</span> <span class="type">Clock</span> clock;
+    <span class="cmt">// ... many other fields, wired up by 200 lines of construction logic</span>
+
+    <span class="kw">public</span> <span class="fn">LegacyOrderService</span>(<span class="type">ComplicatedConfig</span> cfg) {
+        <span class="cmt">// long, untouchable initialization</span>
+        <span class="kw">this</span>.clock = <span class="type">Clock</span>.systemUTC();
+        <span class="cmt">// ... 200 more lines</span>
+    }
+
+    <span class="kw">public</span> <span class="type">Receipt</span> <span class="fn">placeOrder</span>(<span class="type">Order</span> order) {
+        <span class="kw">return new</span> <span class="type">Receipt</span>(order, clock.instant());
+    }
+}</code></pre>
+
+<p class="before-after">After — a deliberately-named setter replaces the field after construction:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">LegacyOrderService</span> {
+    <span class="kw">private</span> <span class="type">Clock</span> clock;
+    <span class="cmt">// ... many other fields, unchanged</span>
+
+    <span class="kw">public</span> <span class="fn">LegacyOrderService</span>(<span class="type">ComplicatedConfig</span> cfg) {
+        <span class="cmt">// original construction logic untouched</span>
+        <span class="kw">this</span>.clock = <span class="type">Clock</span>.systemUTC();
+        <span class="cmt">// ...</span>
+    }
+
+    <span class="cmt">// Deliberately ugly name — signals test-only intent</span>
+    <span class="kw">public void</span> <span class="fn">supersedeClock</span>(<span class="type">Clock</span> newClock) {
+        <span class="kw">this</span>.clock = newClock;
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">receiptUsesInjectedClock</span>() {
+    <span class="type">LegacyOrderService</span> service = <span class="kw">new</span> <span class="type">LegacyOrderService</span>(<span class="type">ComplicatedConfig</span>.defaults());
+    service.supersedeClock(<span class="type">Clock</span>.fixed(<span class="type">Instant</span>.EPOCH, <span class="type">ZoneOffset</span>.UTC));
+
+    <span class="type">Receipt</span> r = service.placeOrder(<span class="type">Order</span>.sample());
+
+    <span class="fn">assertEquals</span>(<span class="type">Instant</span>.EPOCH, r.getTimestamp());
+}</code></pre>
+
+<p>The real <code>Clock.systemUTC()</code> still runs during construction (and any side effects with it), but by the time the test exercises <code>placeOrder</code>, the field points at the fake. Feathers considers Supersede Instance Variable acceptable only when nothing cleaner is available; once the codebase tolerates changes, migrate to Parameterize Constructor and delete the superseder.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Parameter list growth</h4>
+
+<p>Each dependency you extract adds a parameter. A class with six collaborators ends up with a six-argument constructor, which is ugly and pushes toward the <em>Long Parameter List</em> smell. That's the honest trade-off Feathers acknowledges: testability now, cosmetic cleanup later. If the list grows genuinely unmanageable, it's a signal that the class itself is doing too much — split it, don't cover the problem with a builder.</p>
+
+<h4>Convenience constructor vs. no default</h4>
+
+<p>The convenience no-arg constructor is useful when callers can't all be updated at once, but it has a cost: it hides the dependencies from the type system again and can quietly keep the bad pattern alive for years. Once the caller list is manageable, delete the convenience constructor and force every caller to declare what it's wiring in.</p>
+
+<h4>Pair with Extract Interface</h4>
+
+<p>Parameterize Constructor alone isn't enough if the collaborator's type is a concrete class that's still painful to construct. Combine it with <em>Extract Interface</em>: extract an interface from the collaborator, parameterize the constructor with the interface type, and pass a fake that implements the interface in tests. This pair of techniques covers the majority of real Java dependency-breaking work.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameterize Method</em> is a narrower sibling — when the dependency is only used by one method, pass it as a method argument instead of a constructor argument. <em>Extract Interface</em> is the almost-always companion: extract an interface from the collaborator's type, then parameterize the constructor with the interface rather than a concrete class. Extract and Override Factory Method and Supersede Instance Variable are covered in full above.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

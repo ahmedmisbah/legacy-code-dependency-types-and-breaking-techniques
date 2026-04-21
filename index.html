@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dependencies and their Chapter 25 Fixes</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .group {
+    margin-bottom: 2.5rem;
+  }
+  .group-intro {
+    color: #9ba3c2;
+    margin-bottom: 1rem;
+  }
+  .pairing-list {
+    list-style: none;
+    margin-left: 0;
+  }
+  .pairing-list li {
+    background: #111842;
+    border: 1px solid #1e2a5e;
+    border-radius: 6px;
+    padding: 0.9rem 1.2rem;
+    margin-bottom: 0.8rem;
+    transition: border-color 0.15s;
+  }
+  .pairing-list li:hover {
+    border-color: #6b9fff;
+  }
+  .pairing-list a {
+    color: #FFFFFF;
+    text-decoration: none;
+    display: block;
+  }
+  .pairing-list a:hover {
+    text-decoration: none;
+  }
+  .pairing-list .dep-name {
+    color: #FFFFFF;
+    font-weight: 600;
+    font-size: 1.05rem;
+  }
+  .pairing-list .arrow {
+    color: #c77dff;
+    margin: 0 0.6rem;
+  }
+  .pairing-list .tech-name {
+    color: #6b9fff;
+    font-weight: 500;
+  }
+  .pairing-list .blurb {
+    color: #9ba3c2;
+    font-size: 0.9rem;
+    margin-top: 0.3rem;
+    line-height: 1.5;
+  }
+  .intro {
+    color: #9ba3c2;
+    font-size: 1.05rem;
+    margin-bottom: 2.5rem;
+  }
+  .intro p { color: #9ba3c2; }
+  .intro strong { color: #FFFFFF; }
+</style>
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<h1>Dependencies and their Chapter 25 Fixes</h1>
+<p class="aka">A pairing guide &middot; Java dependency types &middot; Feathers' dependency-breaking techniques</p>
+
+<div class="intro">
+  <p>Michael Feathers' <em>Working Effectively with Legacy Code</em> catalogs twenty-four techniques for breaking dependencies so that legacy code can be brought under test. The techniques are organized as a reference alphabet, not as a flowchart — you're expected to recognize your situation and pick the right tool.</p>
+
+  <p>This site does the matching work for you. Each page pairs a <strong>Java dependency type</strong> (the shape of the problem you're facing in the code) with the <strong>Chapter 25 technique</strong> that Feathers recommends as the primary fix, plus the supporting techniques that handle adjacent cases. Every example is in Java, and every "Why this blocks tests" section is grounded in Feathers' <em>sensing</em> and <em>separation</em> framing from Chapter 3.</p>
+
+  <p>The final group, <strong>Beyond Chapter 25</strong>, covers Java dependency types the book doesn't name — time, randomness, filesystem, threading, and DI containers — because the relevant APIs and frameworks largely postdate the book's 2004 publication. The techniques there still apply Feathers' principles; they just use specific Java conventions that had to be invented later.</p>
+</div>
+
+<hr>
+
+<div class="group">
+  <h2>Fields and construction</h2>
+  <p class="group-intro">Dependencies that live in the class itself — wired in when the object is created or accessed through its own fields.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="constructor-dependency-parameterize-constructor.html">
+        <span class="dep-name">Constructor Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Parameterize Constructor</span>
+        <div class="blurb">The class creates its collaborators with <code>new</code> inside its constructor. The most common pattern and usually the easiest to fix.</div>
+      </a>
+    </li>
+    <li>
+      <a href="hidden-dependency-extract-and-override-factory-method.html">
+        <span class="dep-name">Hidden Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract and Override Factory Method</span>
+        <div class="blurb">The constructor makes <em>decisions</em> about which collaborator to build, not just a simple <code>new</code>. Move the logic into an overridable factory method.</div>
+      </a>
+    </li>
+    <li>
+      <a href="instance-variable-dependency-extract-and-override-getter.html">
+        <span class="dep-name">Instance Variable Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract and Override Getter</span>
+        <div class="blurb">The class holds a problematic collaborator as a field, sometimes lazy-initialized. Route every read through a getter a subclass can override.</div>
+      </a>
+    </li>
+    <li>
+      <a href="parameter-dependency-extract-interface.html">
+        <span class="dep-name">Parameter Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract Interface</span>
+        <div class="blurb">The method takes a concrete type that's hard to construct or fake. Lift the methods used into an interface; tests pass in a fake implementation.</div>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Globals and static access</h2>
+  <p class="group-intro">Dependencies that live outside the object graph — globals, singletons, static methods. No injection point at all, so the first job is creating one.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="global-reference-dependency-encapsulate-global-references.html">
+        <span class="dep-name">Global Reference Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Encapsulate Global References</span>
+        <div class="blurb">Code reads <code>System.getenv</code>, static fields, or environment state directly. Wrap them in an object so the rest of the code stops noticing.</div>
+      </a>
+    </li>
+    <li>
+      <a href="singleton-dependency-introduce-static-setter.html">
+        <span class="dep-name">Singleton Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Introduce Static Setter</span>
+        <div class="blurb">Code uses <code>getInstance()</code> to reach a shared service. Add a test-only static setter that lets tests substitute a fake.</div>
+      </a>
+    </li>
+    <li>
+      <a href="static-method-dependency-introduce-instance-delegator.html">
+        <span class="dep-name">Static Method Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Introduce Instance Delegator</span>
+        <div class="blurb">Code calls <code>Util.doSomething()</code> with no seam. Create an instance method that delegates to the static; override it in a test subclass.</div>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Call sites and external surface</h2>
+  <p class="group-intro">Dependencies concentrated at specific lines of code or at the boundary with code you don't own.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="side-effect-dependency-extract-and-override-call.html">
+        <span class="dep-name">Side-Effect Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract and Override Call</span>
+        <div class="blurb">A method has one or two lines that do something tests can't tolerate (emails, writes, postings). Isolate each into a protected method a subclass can neutralize.</div>
+      </a>
+    </li>
+    <li>
+      <a href="library-framework-dependency-adapt-parameter.html">
+        <span class="dep-name">Library / Framework Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Adapt Parameter</span>
+        <div class="blurb">The parameter's type is a framework class you can't modify (HttpServletRequest, ResultSet). Introduce your own interface and an adapter that wraps the framework type.</div>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Scale problems</h2>
+  <p class="group-intro">Dependencies that aren't one bad collaborator but an accumulation — too many to fix individually, or tangled up inside one giant unit.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="large-class-dependency-push-down-dependency.html">
+        <span class="dep-name">Large-Class Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Push Down Dependency</span>
+        <div class="blurb">A class has so many problematic collaborators that fixing them one at a time gets nowhere. Make the class abstract; push infrastructure into a production subclass; test via a test subclass.</div>
+      </a>
+    </li>
+    <li>
+      <a href="monster-method-dependency-break-out-method-object.html">
+        <span class="dep-name">Monster-Method Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Break Out Method Object</span>
+        <div class="blurb">A method is so large that its locals are the dependencies — extract-method fails because every piece references every other piece. Promote the method to its own class where locals become fields.</div>
+      </a>
+    </li>
+    <li>
+      <a href="build-time-dependency-extract-interface.html">
+        <span class="dep-name">Build-Time Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract Interface</span>
+        <div class="blurb">The tests pass but nobody runs them because rebuilds take minutes. Pull a stable contract out of the concrete class so implementation changes stop forcing client recompilation.</div>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<div class="group">
+  <h2>Beyond Chapter 25</h2>
+  <p class="group-intro">Java dependency types that Feathers' 2004 catalog doesn't name as techniques. In some cases (time, randomness) the relevant APIs hadn't been standardized yet. In others (DI containers, reactive streams) the frameworks that made these concerns common postdate the book. In all cases the principles remain Feathers' — every page here is an application of <em>Parameterize Constructor</em>, <em>Encapsulate Global References</em>, <em>Extract Interface</em>, <em>Extract and Override Call</em>, or <em>Adapt Parameter</em> — but the specific patterns are post-2004 Java conventions.</p>
+
+  <h3>Non-deterministic primitives</h3>
+  <p class="group-intro">Global access to a JDK primitive that returns a different answer every time — time and randomness being the canonical cases. The fix is <em>Encapsulate Global References</em> specialized to the primitive.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="time-clock-dependency-inject-a-clock.html">
+        <span class="dep-name">Time / Clock Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Inject a Clock</span>
+        <div class="blurb">Code reaches for <code>Instant.now()</code> or <code>System.currentTimeMillis()</code>. Pass in a <code>java.time.Clock</code>; tests use <code>Clock.fixed</code> for frozen time or a mutable clock for simulated progression.</div>
+      </a>
+    </li>
+    <li>
+      <a href="randomness-dependency-inject-a-random-source.html">
+        <span class="dep-name">Randomness Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Inject a Random Source</span>
+        <div class="blurb">Code calls <code>Math.random()</code>, <code>ThreadLocalRandom</code>, or <code>UUID.randomUUID()</code>. Inject a <code>Random</code> with a fixed seed and a <code>Supplier&lt;UUID&gt;</code>; tests become deterministic.</div>
+      </a>
+    </li>
+  </ul>
+
+  <h3>Concurrency</h3>
+  <p class="group-intro">Code whose behavior depends on <em>when</em> work happens. Two distinct shapes: producing async work (where does it run?) and consuming async results (how do results come back?). Different seams, different fakes.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="threading-async-dependency-inject-an-executor.html">
+        <span class="dep-name">Threading / Concurrency Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Inject an Executor</span>
+        <div class="blurb">Your code spawns threads or calls <code>CompletableFuture.runAsync</code> without an explicit executor. Inject an <code>Executor</code>; tests pass a synchronous one so async work becomes deterministic.</div>
+      </a>
+    </li>
+    <li>
+      <a href="async-result-dependency-supply-pre-completed-results.html">
+        <span class="dep-name">Async Result Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Supply Pre-Completed Results</span>
+        <div class="blurb">Your code consumes <code>CompletableFuture</code>s or callbacks from a collaborator. Extract an interface and fake it with <code>CompletableFuture.completedFuture</code> — no threading, no waiting, no flakiness.</div>
+      </a>
+    </li>
+  </ul>
+
+  <h3>External resources</h3>
+  <p class="group-intro">I/O boundaries to things outside the JVM — disk, network, remote services. The fix is <em>Adapt Parameter</em> specialized to the specific boundary, combined with tooling the community has built for each one (Jimfs, WireMock, etc.).</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="filesystem-dependency-abstract-the-filesystem.html">
+        <span class="dep-name">Filesystem Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Abstract the Filesystem</span>
+        <div class="blurb">Code uses <code>Files.readAllBytes</code> and <code>new FileInputStream</code> directly. Use Java NIO's <code>FileSystem</code> abstraction with Jimfs in tests, or a narrow interface you own.</div>
+      </a>
+    </li>
+    <li>
+      <a href="network-protocol-dependency-extract-client-adapter.html">
+        <span class="dep-name">Network / Protocol Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Extract a Client Adapter</span>
+        <div class="blurb">Code calls a REST API, vendor SDK, or raw HTTP client directly. Pull the operations into an interface stated in your domain types; fakes for unit tests, WireMock for integration tests.</div>
+      </a>
+    </li>
+  </ul>
+
+  <h3>Framework and language constraints</h3>
+  <p class="group-intro">Situations where Chapter 25 moves don't apply because the type system or framework forbids them — final classes that can't be subclassed, framework parents you can't modify, container-managed instantiation that tests can't reproduce, reflective calls that bypass normal type checking.</p>
+
+  <ul class="pairing-list">
+    <li>
+      <a href="inheritance-dependency-compose-around-inherited-type.html">
+        <span class="dep-name">Inheritance Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Compose Around the Inherited Type</span>
+        <div class="blurb">Your class is forced to extend a framework parent (<code>HttpServlet</code>, Spring controller, JPA entity base). Extract the business logic into a handler class you own; the framework class becomes a thin translator.</div>
+      </a>
+    </li>
+    <li>
+      <a href="final-sealed-dependency-wrap-with-hand-written-adapter.html">
+        <span class="dep-name">Final / Sealed Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Wrap with a Hand-Written Adapter</span>
+        <div class="blurb">You depend on a <code>final</code> class or a class with <code>final</code> methods — Subclass and Override can't compile. Write a small interface and adapter you own, or reach for Mockito's <code>mock-maker-inline</code>.</div>
+      </a>
+    </li>
+    <li>
+      <a href="di-container-dependency-bypass-the-container.html">
+        <span class="dep-name">DI Container Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Bypass the Container</span>
+        <div class="blurb">A class uses field injection and container lifecycle hooks — tests have to boot Spring to do anything. Convert to constructor injection so tests can instantiate with <code>new</code> and skip the container entirely.</div>
+      </a>
+    </li>
+    <li>
+      <a href="reflection-dependency-wrap-the-reflective-call.html">
+        <span class="dep-name">Reflection-Based Dependency</span>
+        <span class="arrow">→</span>
+        <span class="tech-name">Wrap the Reflective Call</span>
+        <div class="blurb">Code uses <code>Class.forName</code>, <code>Method.invoke</code>, or dynamic proxies. Extract the reflective call into a protected method typed with your domain types; override it in a test subclass.</div>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<hr>
+
+<div class="note">
+<strong>On the mapping.</strong> Feathers' book doesn't present techniques as strictly paired with dependency types — the Chapter 25 catalog is a prose reference rather than a lookup table. The pairings in the first four groups reflect one reasonable reading of which technique fits which problem first, with supporting techniques covering variations on each page. The fifth group, <em>Beyond Chapter 25</em>, covers Java dependency types that postdate the book; the fixes there apply Feathers' principles (most often <em>Parameterize Constructor</em>, <em>Extract Interface</em>, <em>Adapt Parameter</em>, <em>Extract and Override Call</em>, or <em>Encapsulate Global References</em>) to cases he couldn't have named. Many techniques apply across several dependency types — <em>Extract Interface</em> shows up twice in the first groups (parameter and build-time), underlies the network adapter and async-result pages, and appears as a supporting move on several others.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

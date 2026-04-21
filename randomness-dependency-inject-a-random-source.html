@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Randomness Dependency → Inject a Random Source</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Randomness Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Inject a Random Source</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Randomness Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Inject a Random Source</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' catalog doesn't name a technique specifically for random numbers. Like time, randomness is a case of Feathers' <em>Encapsulate Global References</em> applied to a specific primitive — <code>Math.random()</code>, <code>ThreadLocalRandom</code>, <code>UUID.randomUUID()</code> — with the fix delivered via <em>Parameterize Constructor</em>. The shape is identical to Clock injection; only the type being injected changes.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>randomness dependency</strong> exists wherever code calls a non-deterministic generator: <code>Math.random()</code>, <code>new Random().nextInt()</code>, <code>ThreadLocalRandom.current().nextDouble()</code>, <code>UUID.randomUUID()</code>, <code>SecureRandom.nextBytes(...)</code>. Each call returns a value nobody can predict. The class using these calls makes decisions that cannot be reproduced.</p>
+
+<p>Common places this bites: A/B test bucketing, sampling, retry jitter, shuffling, cryptographic nonces, correlation IDs, short-code generation, simulated dice rolls, load balancing, exponential backoff. Any of these, left un-injected, makes the containing class un-testable except by running many trials and asserting statistical properties — which is slow, imprecise, and often flaky.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Every run produces a different answer</h4>
+
+<p>A test that exercises code branching on <code>random.nextInt(100) &lt; 50</code> hits one branch roughly half the time. A test that asserts the "heads" branch was taken either fails intermittently or spins in a loop until it happens to see heads — neither is a real test.</p>
+
+<h4>UUIDs make objects unequal to themselves</h4>
+
+<p>If a class under test stamps objects with <code>UUID.randomUUID()</code>, no two test runs produce the same object. Tests comparing against known-good fixtures can't use the IDs; tests capturing-then-comparing are circular.</p>
+
+<h4>Statistical assertions hide bugs</h4>
+
+<p>When teams give up on determinism, they fall back to assertions like <em>"should be heads at least 40% of 1000 trials"</em>. These tests are slow, occasionally fail for real reasons and occasionally fail for noise, and tell you nothing about which specific path the code took.</p>
+
+<h4>Cryptographic code resists testing entirely</h4>
+
+<p>Code using <code>SecureRandom</code> for nonces or key material can't be unit-tested against specific outputs, because the whole point of the generator is that outputs can't be predicted. The fix is the same seam — inject a source — with extra care about what the test source is allowed to produce.</p>
+
+<hr>
+
+<h2>The technique: Inject a Random Source</h2>
+
+<p><strong>Inject a Random Source</strong> replaces direct generator calls with calls on an injected <code>Random</code> (or a narrower interface). The class's constructor takes a <code>Random</code>; production passes <code>new Random()</code> or <code>new SecureRandom()</code>; tests pass <code>new Random(seed)</code> with a fixed seed, or a fake that returns canned values for each call.</p>
+
+<p>For <code>UUID.randomUUID</code> specifically, the neat approach is to inject a <code>Supplier&lt;UUID&gt;</code> — in production <code>UUID::randomUUID</code>, in tests a counter that returns predictable UUIDs. Java's functional interfaces make this a one-liner.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Any class whose behavior branches on or emits random values.</li>
+  <li>Tests need to verify specific branches or assert on specific outputs.</li>
+  <li>You control the class's construction (direct <code>new</code> or via a DI container you can configure).</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>Randomness is purely cosmetic — a log correlation ID that no test will ever assert on. Injection is overkill.</li>
+  <li>The random call is deep in a performance-critical loop and the abstraction cost matters — profile first, then decide.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>CouponService</code> uses a static random and a raw UUID call:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">CouponService</span> {
+    <span class="kw">public</span> <span class="type">Coupon</span> <span class="fn">issue</span>(<span class="type">Customer</span> c) {
+        <span class="type">UUID</span> id = <span class="type">UUID</span>.randomUUID();
+        <span class="kw">int</span> discount = <span class="type">ThreadLocalRandom</span>.current().nextInt(<span class="num">5</span>, <span class="num">26</span>); <span class="cmt">// 5% – 25%</span>
+        <span class="kw">boolean</span> premium = <span class="type">ThreadLocalRandom</span>.current().nextDouble() &lt; <span class="num">0.10</span>;
+        <span class="kw">return new</span> <span class="type">Coupon</span>(id, c.getId(), discount, premium);
+    }
+}</code></pre>
+
+<p>Nothing about the returned coupon is predictable. A test asserting <em>"premium should be true about 10% of the time"</em> would require thousands of iterations and would still be flaky.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List every random-source call: <code>Random</code>, <code>ThreadLocalRandom</code>, <code>Math.random()</code>, <code>UUID.randomUUID()</code>, <code>SecureRandom</code>.</li>
+  <li>Decide on abstractions. <code>Random</code> itself is often fine as a constructor parameter. For UUIDs, a <code>Supplier&lt;UUID&gt;</code> is cleaner than passing a full generator.</li>
+  <li>Add constructor parameters, and add a convenience no-arg constructor that supplies the production defaults.</li>
+  <li>Replace each direct call with a call on the injected source.</li>
+  <li>In tests, pass <code>new Random(seed)</code> with a known seed, or a small fake that returns pre-programmed values in sequence.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">CouponService</span> {
+    <span class="kw">private final</span> <span class="type">Random</span> random;
+    <span class="kw">private final</span> <span class="type">Supplier</span>&lt;<span class="type">UUID</span>&gt; uuidSource;
+
+    <span class="kw">public</span> <span class="fn">CouponService</span>(<span class="type">Random</span> random, <span class="type">Supplier</span>&lt;<span class="type">UUID</span>&gt; uuidSource) {
+        <span class="kw">this</span>.random = random;
+        <span class="kw">this</span>.uuidSource = uuidSource;
+    }
+
+    <span class="kw">public</span> <span class="fn">CouponService</span>() {
+        <span class="kw">this</span>(<span class="kw">new</span> <span class="type">Random</span>(), <span class="type">UUID</span>::randomUUID);
+    }
+
+    <span class="kw">public</span> <span class="type">Coupon</span> <span class="fn">issue</span>(<span class="type">Customer</span> c) {
+        <span class="type">UUID</span> id = uuidSource.get();
+        <span class="kw">int</span> discount = random.nextInt(<span class="num">5</span>, <span class="num">26</span>);
+        <span class="kw">boolean</span> premium = random.nextDouble() &lt; <span class="num">0.10</span>;
+        <span class="kw">return new</span> <span class="type">Coupon</span>(id, c.getId(), discount, premium);
+    }
+}
+
+<span class="cmt">// Test — same seed, same outputs, every time</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">issuedCouponUsesInjectedRandomness</span>() {
+    <span class="type">Random</span> seeded = <span class="kw">new</span> <span class="type">Random</span>(<span class="num">42</span>);
+    <span class="type">UUID</span> fakeId = <span class="type">UUID</span>.fromString(<span class="str">"00000000-0000-0000-0000-000000000001"</span>);
+
+    <span class="type">CouponService</span> svc = <span class="kw">new</span> <span class="type">CouponService</span>(seeded, () -&gt; fakeId);
+    <span class="type">Coupon</span> c = svc.issue(<span class="type">Customer</span>.withId(<span class="str">"cust-1"</span>));
+
+    <span class="fn">assertEquals</span>(fakeId, c.getId());
+    <span class="fn">assertTrue</span>(c.getDiscount() &gt;= <span class="num">5</span> &amp;&amp; c.getDiscount() &lt; <span class="num">26</span>);
+    <span class="cmt">// With seed=42, random.nextDouble() returns ~0.73... so premium == false</span>
+    <span class="fn">assertFalse</span>(c.isPremium());
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">returnsPremiumWhenRandomBelowThreshold</span>() {
+    <span class="type">Random</span> scripted = <span class="kw">new</span> <span class="type">Random</span>() {
+        <span class="ann">@Override</span> <span class="kw">public int</span> <span class="fn">nextInt</span>(<span class="kw">int</span> origin, <span class="kw">int</span> bound) { <span class="kw">return</span> <span class="num">15</span>; }
+        <span class="ann">@Override</span> <span class="kw">public double</span> <span class="fn">nextDouble</span>() { <span class="kw">return</span> <span class="num">0.05</span>; }
+    };
+
+    <span class="type">CouponService</span> svc = <span class="kw">new</span> <span class="type">CouponService</span>(scripted, () -&gt; <span class="type">UUID</span>.randomUUID());
+    <span class="type">Coupon</span> c = svc.issue(<span class="type">Customer</span>.withId(<span class="str">"cust-2"</span>));
+
+    <span class="fn">assertEquals</span>(<span class="num">15</span>, c.getDiscount());
+    <span class="fn">assertTrue</span>(c.isPremium());
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Counter-based UUID sources</h4>
+
+<p>Rather than returning the same UUID every time, a test <code>Supplier&lt;UUID&gt;</code> that counts is often more useful — it lets the test distinguish multiple coupons issued in sequence while still being deterministic:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">CountingUuidSource</span> <span class="kw">implements</span> <span class="type">Supplier</span>&lt;<span class="type">UUID</span>&gt; {
+    <span class="kw">private final</span> <span class="type">AtomicLong</span> counter = <span class="kw">new</span> <span class="type">AtomicLong</span>();
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">UUID</span> <span class="fn">get</span>() {
+        <span class="kw">return new</span> <span class="type">UUID</span>(<span class="num">0L</span>, counter.incrementAndGet());
+    }
+}</code></pre>
+
+<h4>A narrower interface for finer control</h4>
+
+<p>For complex generator logic, inject a domain-specific interface rather than raw <code>Random</code>. <code>CouponService</code> might take a <code>DiscountRoller</code> with methods <code>int discountPercent()</code> and <code>boolean isPremium()</code>. The production implementation consults <code>Random</code>; tests implement the interface directly with whatever values the test needs. This is <em>Extract Interface</em> applied to the random source.</p>
+
+<h4>Extract and Override Getter</h4>
+
+<p>For classes you can't easily re-wire, fall back to Feathers' standard move: wrap each generator call in a protected method (<code>protected int rollDiscount() { return ThreadLocalRandom.current().nextInt(5, 26); }</code>), then override in a test subclass.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Seed choice matters</h4>
+
+<p>Tests using <code>new Random(seed)</code> depend on the JDK's PRNG sequence. That sequence is documented and stable across JVM versions — but if you ever switch to a different generator (<code>SplittableRandom</code>, <code>SecureRandom</code>), the sequences differ. For long-term stability, consider scripted fakes rather than seeds.</p>
+
+<h4>SecureRandom in production, seeded Random in tests</h4>
+
+<p>Production code should usually use <code>SecureRandom</code> for cryptographic purposes. Tests don't need cryptographic strength — a plain seeded <code>Random</code> is fine, because test determinism is the priority. Just make sure the class accepts the base <code>Random</code> type and production passes a <code>SecureRandom</code>.</p>
+
+<h4>ThreadLocalRandom and performance</h4>
+
+<p><code>ThreadLocalRandom</code> exists because shared <code>Random</code> instances contend under thread pressure. Injecting a single <code>Random</code> per service can, in extreme cases, become a contention point. Measure before worrying — for most application code, a single instance is fine.</p>
+
+<h4>Don't over-inject</h4>
+
+<p>A class that already has six constructor parameters doesn't want a seventh for a single random call. If the class is getting crowded, consider a small <code>Randomness</code> holder that bundles the sources it needs, and inject that instead.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Encapsulate Global References</em> is the Ch 25 principle, with this page being its Java-specific application. <em>Time / Clock Dependency → Inject a Clock</em> is the sibling problem for time; the shape of the fix is identical.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific technique is a post-2004 Java community convention.
+</footer>
+
+</body>
+</html>

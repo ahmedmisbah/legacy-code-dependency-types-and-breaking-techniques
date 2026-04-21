@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Library / Framework Dependency → Adapt Parameter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Library / Framework Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Adapt Parameter</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Library / Framework Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Adapt Parameter</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>library or framework dependency</strong> arises when your code is coupled to a type you don't own and can't modify: <code>HttpServletRequest</code>, <code>ResultSet</code>, a vendor's <code>SDKClient</code>, or a type declared <code>final</code> or <code>sealed</code> in someone else's JAR. You can't add <code>implements</code> to it. You can't subclass it. You may not even be able to construct it without a full framework runtime (servlet container, JDBC driver, cloud SDK).</p>
+
+<p>This is the dependency type Feathers' <em>Extract Interface</em> technique doesn't solve directly — Extract Interface requires that you can declare the existing class as implementing a new interface, which is precisely what you can't do here. Adapt Parameter is the workaround.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>You can't modify the class</h4>
+
+<p>The class's source isn't yours to change. You can't add an interface, you can't add methods, you can't relax <code>final</code>. The standard dependency-breaking techniques that rely on touching the class's source don't apply.</p>
+
+<h4>You often can't construct it</h4>
+
+<p>Framework types typically assume they're being created by the framework itself. <code>HttpServletRequest</code> is produced by the servlet container; a <code>ResultSet</code> comes from a live JDBC <code>Statement</code>. Even if you could instantiate one, the constructor may require infrastructure your tests don't have.</p>
+
+<h4>It's often <code>final</code> or <code>sealed</code></h4>
+
+<p>Many library types are deliberately locked down. Subclassing to override a method (the standard fallback) doesn't compile. Feathers calls this the <em>restricted override dilemma</em>: design constraints meant to protect consumers from misuse also prevent testing.</p>
+
+<h4>Mocking frameworks help but have limits</h4>
+
+<p>Tools like Mockito can produce instances of framework types (via bytecode generation), which lets you stub methods. That's convenient, but it ties every test to the mocking framework, makes failures harder to diagnose, and doesn't work at all for truly <code>final</code> classes without special configuration. A hand-written adapter is often more durable.</p>
+
+<hr>
+
+<h2>The technique: Adapt Parameter</h2>
+
+<p><strong>Adapt Parameter</strong> introduces a new interface that <em>you</em> own, declaring the methods your code actually needs from the library type. The method under test takes this interface instead of the library type. In production, an adapter class wraps the real library object and delegates calls to it. In tests, you implement the interface directly with a fake.</p>
+
+<p>The key insight is that your code usually needs only a tiny slice of the library type's surface. <code>HttpServletRequest</code> has dozens of methods; your method may call two. The interface captures just those two, your adapter forwards just those two, and the test implements just those two.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A method takes (or uses) a framework / library type you can't modify.</li>
+  <li>Your method uses a small, well-defined subset of the type's methods.</li>
+  <li>You want tests that don't require the framework runtime.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>You own the library type — <em>Extract Interface</em> is simpler (no adapter needed).</li>
+  <li>Your code uses the framework type extensively across many methods — a focused adapter per use-site makes more sense than one giant one.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>FormProcessor.populate</code> takes a raw <code>HttpServletRequest</code>:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">FormProcessor</span> {
+    <span class="kw">public void</span> <span class="fn">populate</span>(<span class="type">HttpServletRequest</span> request) {
+        <span class="type">String</span>[] values = request.getParameterValues(<span class="str">"pageState"</span>);
+        <span class="kw">if</span> (values != <span class="kw">null</span> &amp;&amp; values.length &gt; <span class="num">0</span>) {
+            applyState(values[<span class="num">0</span>]);
+        }
+
+        <span class="type">String</span> referrer = request.getHeader(<span class="str">"Referer"</span>);
+        <span class="kw">if</span> (referrer != <span class="kw">null</span>) {
+            trackReferrer(referrer);
+        }
+    }
+}</code></pre>
+
+<p>Testing <code>populate</code> means constructing or mocking an <code>HttpServletRequest</code> — a sprawling interface with dozens of methods and complicated implementations.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List the methods your code actually calls on the library type. Here: <code>getParameterValues</code>, <code>getHeader</code>.</li>
+  <li>Define a new interface with just those methods, named for the role the parameter plays (not for the library). <code>FormRequest</code>, say.</li>
+  <li>Write an adapter class that implements the interface and delegates to the library type.</li>
+  <li>Change the method signature to accept the interface instead of the library type.</li>
+  <li>At production call sites, wrap the library object in the adapter: <code>populate(new ServletFormRequest(httpRequest))</code>.</li>
+  <li>In tests, implement the interface with a fake — often a simple inner class or lambda.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// The interface — only the methods FormProcessor actually needs</span>
+<span class="kw">public interface</span> <span class="type">FormRequest</span> {
+    <span class="type">String</span>[] <span class="fn">parameter</span>(<span class="type">String</span> name);
+    <span class="type">String</span> <span class="fn">header</span>(<span class="type">String</span> name);
+}
+
+<span class="cmt">// Adapter for production — delegates to the real framework type</span>
+<span class="kw">public class</span> <span class="type">ServletFormRequest</span> <span class="kw">implements</span> <span class="type">FormRequest</span> {
+    <span class="kw">private final</span> <span class="type">HttpServletRequest</span> req;
+    <span class="kw">public</span> <span class="fn">ServletFormRequest</span>(<span class="type">HttpServletRequest</span> req) { <span class="kw">this</span>.req = req; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">String</span>[] <span class="fn">parameter</span>(<span class="type">String</span> name) { <span class="kw">return</span> req.getParameterValues(name); }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">String</span> <span class="fn">header</span>(<span class="type">String</span> name) { <span class="kw">return</span> req.getHeader(name); }
+}
+
+<span class="cmt">// The class under test now takes the interface</span>
+<span class="kw">public class</span> <span class="type">FormProcessor</span> {
+    <span class="kw">public void</span> <span class="fn">populate</span>(<span class="type">FormRequest</span> request) {
+        <span class="type">String</span>[] values = request.parameter(<span class="str">"pageState"</span>);
+        <span class="kw">if</span> (values != <span class="kw">null</span> &amp;&amp; values.length &gt; <span class="num">0</span>) applyState(values[<span class="num">0</span>]);
+
+        <span class="type">String</span> referrer = request.header(<span class="str">"Referer"</span>);
+        <span class="kw">if</span> (referrer != <span class="kw">null</span>) trackReferrer(referrer);
+    }
+}
+
+<span class="cmt">// Production call site</span>
+processor.populate(<span class="kw">new</span> <span class="type">ServletFormRequest</span>(httpServletRequest));
+
+<span class="cmt">// Test — no servlet container, no mocking framework needed</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">populateAppliesPageStateParameter</span>() {
+    <span class="type">FormRequest</span> fake = <span class="kw">new</span> <span class="type">FormRequest</span>() {
+        <span class="ann">@Override</span>
+        <span class="kw">public</span> <span class="type">String</span>[] <span class="fn">parameter</span>(<span class="type">String</span> name) {
+            <span class="kw">return</span> name.equals(<span class="str">"pageState"</span>) ? <span class="kw">new</span> <span class="type">String</span>[] { <span class="str">"active"</span> } : <span class="kw">null</span>;
+        }
+        <span class="ann">@Override</span>
+        <span class="kw">public</span> <span class="type">String</span> <span class="fn">header</span>(<span class="type">String</span> name) { <span class="kw">return null</span>; }
+    };
+
+    <span class="kw">new</span> <span class="type">FormProcessor</span>().populate(fake);
+
+    <span class="fn">assertEquals</span>(<span class="str">"active"</span>, currentPageState());
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract Interface (via wrapper)</h4>
+
+<p>A close cousin of Adapt Parameter that applies when the library type's entire role in your system can be captured in one interface, not just the slice used at one call site. The difference is organizational: Adapt Parameter typically creates a narrow per-use-site interface; Extract Interface via wrapper creates one broader interface that multiple methods in your codebase depend on. Both techniques rely on the same fundamental trick — an adapter class you own bridges the library type to an interface you own.</p>
+
+<h4>Hand-written fakes over mocking frameworks</h4>
+
+<p>Not a Chapter 25 technique, but worth noting alongside Adapt Parameter: once the adapter is in place, you <em>could</em> use Mockito to mock the interface. Hand-written fakes are often clearer, don't require framework setup, compile-time-check themselves, and remain readable years later. For any fake you use across many tests, invest in a named class rather than a lambda or a mock.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Name the interface after your role, not the library</h4>
+
+<p>The library type might be <code>HttpServletRequest</code>, but your interface should be <code>FormRequest</code>, <code>IncomingMessage</code>, or whatever describes the role in your system. Naming by role keeps the interface stable across library versions and makes the code read better at the point of use.</p>
+
+<h4>The adapter should be dumb</h4>
+
+<p>Every method on the adapter should be a single-line delegation. No caching, no logging, no error translation. Put any smartness in a higher layer. A fat adapter develops its own testing problems.</p>
+
+<h4>Keep the interface minimal</h4>
+
+<p>Expand the interface only when a new method genuinely needs the library's capability. Resist the reflex to expose <em>"all the useful methods"</em> — each additional method is one more thing every fake has to implement.</p>
+
+<h4>Library upgrades become safer</h4>
+
+<p>A secondary benefit worth calling out: when the library changes (<code>HttpServletRequest</code> gains new methods, or the vendor renames something), only the adapter has to track those changes. Your core logic and every test continue to compile unchanged. This is one of the few dependency-breaking techniques that materially improves production code beyond testability.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> When the library type is one you <em>do</em> own and can modify, <em>Extract Interface</em> is simpler and doesn't require an adapter. When the library problem is actually a <em>method</em> (a static call) rather than a parameter, use <em>Introduce Instance Delegator</em>.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

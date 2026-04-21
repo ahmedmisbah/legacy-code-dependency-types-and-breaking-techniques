@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hidden Dependency → Extract and Override Factory Method</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Hidden Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Extract and Override Factory Method</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Hidden Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract and Override Factory Method</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>hidden dependency</strong> is created when a class's constructor performs non-trivial construction work — branching logic, configuration loading, conditional wiring — that decides which concrete collaborators to use. Unlike a plain constructor dependency (a single <code>new</code> call), a hidden dependency embeds <em>decisions</em> inside construction. Parameterizing the constructor would force every caller to reproduce those decisions, which is often impractical and always ugly.</p>
+
+<p>The classic shape is a constructor that reads configuration, checks environment flags, or tests capabilities, and picks one of several possible collaborators accordingly. The resulting object looks the same from outside, but its internals vary with the environment — and tests inherit whichever variant the environment dictates.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The creation logic isn't a single value to substitute</h4>
+
+<p>Parameterize Constructor works when you can replace <code>new Thing()</code> with an incoming parameter. A hidden dependency has an algorithm, not a value. You can't pass in <em>"the result of executing this branching logic under a hypothetical config"</em>.</p>
+
+<h4>Callers can't reproduce the logic cleanly</h4>
+
+<p>Moving the logic into every caller duplicates the decision across the codebase. When the logic later changes (new branch, new config key), every caller needs updating. That's worse, not better.</p>
+
+<h4>The chosen collaborator determines behavior</h4>
+
+<p>In production, the decision picks the heavy real collaborator (database-backed, network-backed, etc.). In tests, you want a fake — but the decision logic doesn't know about tests and has no way to be told.</p>
+
+<h4>Configuration state bleeds into tests</h4>
+
+<p>If the decision depends on a config file or environment variable, tests need those set correctly, turning unit tests into integration tests whose outcomes depend on the test environment.</p>
+
+<hr>
+
+<h2>The technique: Extract and Override Factory Method</h2>
+
+<p><strong>Extract and Override Factory Method</strong> moves the creation logic out of the constructor and into a <code>protected</code> method. The constructor calls the factory method to get its collaborator. Production behavior is unchanged — the factory method still runs the original decision logic. A test subclass overrides the factory method to return whichever fake the test needs, short-circuiting the decision.</p>
+
+<p>This is the technique to reach for whenever parameterizing the constructor would force you to duplicate or encode logic at every call site. It keeps the decision in one place and still gives tests a seam.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A constructor contains branching or configuration-driven creation logic.</li>
+  <li>The class isn't <code>final</code> and the factory method can be protected.</li>
+  <li>You don't want callers to know anything about how construction decides — the logic is an implementation detail.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The constructor contains a simple <code>new</code> with no decision logic — <em>Parameterize Constructor</em> is simpler.</li>
+  <li>The class is <code>final</code> or the test can't subclass it — use <em>Supersede Instance Variable</em> or restructure the creation logic entirely.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>ReportExporter</code>'s constructor decides which writer to use based on configuration:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">ReportExporter</span> {
+    <span class="kw">private final</span> <span class="type">ReportWriter</span> writer;
+
+    <span class="kw">public</span> <span class="fn">ReportExporter</span>(<span class="type">Config</span> config) {
+        <span class="kw">if</span> (config.format() == <span class="type">Format</span>.<span class="type">PDF</span>) {
+            writer = <span class="kw">new</span> <span class="type">PdfReportWriter</span>(config.outputDir(), config.fontBundle());
+        } <span class="kw">else if</span> (config.format() == <span class="type">Format</span>.<span class="type">EXCEL</span>) {
+            writer = <span class="kw">new</span> <span class="type">ExcelReportWriter</span>(config.outputDir(), config.stylesheet());
+        } <span class="kw">else</span> {
+            writer = <span class="kw">new</span> <span class="type">CsvReportWriter</span>(config.outputDir());
+        }
+    }
+
+    <span class="kw">public void</span> <span class="fn">export</span>(<span class="type">Report</span> report) {
+        writer.write(report);
+    }
+}</code></pre>
+
+<p>Every real writer creates files on disk. Parameterizing the constructor with a <code>ReportWriter</code> would work, but then every production caller has to reproduce the decision logic — or a separate factory class has to exist, which is really the same solution with extra ceremony.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the creation expression (or block) inside the constructor.</li>
+  <li>Extract it into a <code>protected</code> method with a descriptive name: <code>createWriter</code>, <code>createGateway</code>, etc.</li>
+  <li>Have the constructor call the new method and assign the result.</li>
+  <li>Verify that production behavior is unchanged — the factory method runs the same logic as before.</li>
+  <li>In tests, create a subclass that overrides the factory method to return a fake. The override should not depend on any subclass-specific state (fields aren't initialized yet when the superclass constructor runs).</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">ReportExporter</span> {
+    <span class="kw">private final</span> <span class="type">ReportWriter</span> writer;
+
+    <span class="kw">public</span> <span class="fn">ReportExporter</span>(<span class="type">Config</span> config) {
+        <span class="kw">this</span>.writer = createWriter(config);
+    }
+
+    <span class="kw">protected</span> <span class="type">ReportWriter</span> <span class="fn">createWriter</span>(<span class="type">Config</span> config) {
+        <span class="kw">if</span> (config.format() == <span class="type">Format</span>.<span class="type">PDF</span>) {
+            <span class="kw">return new</span> <span class="type">PdfReportWriter</span>(config.outputDir(), config.fontBundle());
+        } <span class="kw">else if</span> (config.format() == <span class="type">Format</span>.<span class="type">EXCEL</span>) {
+            <span class="kw">return new</span> <span class="type">ExcelReportWriter</span>(config.outputDir(), config.stylesheet());
+        } <span class="kw">else</span> {
+            <span class="kw">return new</span> <span class="type">CsvReportWriter</span>(config.outputDir());
+        }
+    }
+
+    <span class="kw">public void</span> <span class="fn">export</span>(<span class="type">Report</span> report) {
+        writer.write(report);
+    }
+}
+
+<span class="cmt">// Test subclass — returns a fake without caring about config</span>
+<span class="kw">class</span> <span class="type">TestableReportExporter</span> <span class="kw">extends</span> <span class="type">ReportExporter</span> {
+    <span class="kw">public</span> <span class="fn">TestableReportExporter</span>(<span class="type">Config</span> config) { <span class="kw">super</span>(config); }
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected</span> <span class="type">ReportWriter</span> <span class="fn">createWriter</span>(<span class="type">Config</span> config) {
+        <span class="kw">return new</span> <span class="type">FakeReportWriter</span>();
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">exportPassesReportToWriter</span>() {
+    <span class="type">FakeReportWriter</span> fake = <span class="kw">new</span> <span class="type">FakeReportWriter</span>();
+    <span class="type">ReportExporter</span> exporter = <span class="kw">new</span> <span class="type">ReportExporter</span>(<span class="type">Config</span>.defaults()) {
+        <span class="ann">@Override</span>
+        <span class="kw">protected</span> <span class="type">ReportWriter</span> <span class="fn">createWriter</span>(<span class="type">Config</span> c) { <span class="kw">return</span> fake; }
+    };
+
+    exporter.export(<span class="type">Report</span>.sample());
+
+    <span class="fn">assertNotNull</span>(fake.lastWritten);
+}</code></pre>
+
+<div class="note">
+<strong>Initialization-order gotcha.</strong> The factory method is called from the superclass constructor, which runs before the subclass's own fields are initialized. An override that reads a subclass field will see <code>null</code>. Keep the override self-contained (return a fresh fake inline), use a <code>static</code> holder for configurable fakes, or capture a reference from outside via a final lambda / anonymous inner class that closes over a local.
+</div>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Parameterize Constructor</h4>
+
+<p>If the construction logic turns out to be simpler than it looked — say, just one <code>new</code> guarded by a feature flag — consider moving the decision up a level and parameterizing the constructor to accept the already-constructed collaborator. The flag-checking code becomes the caller's problem, which is often where it belongs anyway.</p>
+
+<h4>Extract and Override Getter</h4>
+
+<p>When the collaborator isn't constructed in the constructor but lazily on first use, the analogous technique is <em>Extract and Override Getter</em>: move the field access (and lazy init) into a protected getter, and override the getter in a test subclass. The difference is where the decision runs — constructor time (factory method) vs. first-access time (getter). See the pairing page for <em>Instance Variable Dependency</em>.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Keep the factory method stateless</h4>
+
+<p>The factory method should depend only on its parameters (typically the config object the constructor received). Don't reference instance fields — they may not be initialized yet when the factory runs during construction. Don't cache results in a static field either, unless you explicitly need cross-instance behavior.</p>
+
+<h4>Resist calling overrideable methods from constructors in general</h4>
+
+<p>Java style guides warn against calling overrideable methods from constructors because of the initialization-order problem. Extract and Override Factory Method is one case where you accept the risk consciously — the override is expected, and you design around the init-order issue. Document the pattern with a comment so the next reader understands why a method is <code>protected</code> and called from the constructor.</p>
+
+<h4>Migrate toward constructor injection eventually</h4>
+
+<p>Like most Feathers techniques, this is a bridge. Once tests cover the class, consider pushing the decision logic into a separate factory or builder class, and have the constructor simply accept the already-chosen collaborator. The test subclass and the protected method become unnecessary.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameterize Constructor</em> is the primary technique for simpler constructor dependencies — see that pairing page for the standard case. <em>Supersede Instance Variable</em> is the fallback when you can't subclass at all.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

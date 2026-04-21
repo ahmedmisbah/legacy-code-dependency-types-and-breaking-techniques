@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Async Result Dependency → Supply Pre-Completed Results</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Async Result Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Supply Pre-Completed Results</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Async Result Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Supply Pre-Completed Results</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25, and distinct from threading.</strong> The <em>Threading / Async Dependency → Inject an Executor</em> pairing covers "my code produces async work" — you inject an executor and use a synchronous one in tests. This pairing covers the <em>other</em> async shape: "my code <strong>consumes</strong> async results from a collaborator that returns <code>CompletableFuture</code>s or calls me back". The fix is <em>Extract Interface</em> on the collaborator plus a fake that returns <strong>already-completed</strong> futures (or invokes callbacks synchronously). Both patterns appear in the same codebase, but they're different seams in different directions.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>An <strong>async result dependency</strong> exists when your class collaborates with something that delivers results asynchronously — a repository that returns <code>CompletableFuture&lt;User&gt;</code>, an SDK client that takes a callback, a reactive stream source, a message bus that invokes a listener. The async is part of the collaborator's contract; it's not something your class chose to introduce. Your class has to compose with the future chain or register a callback, and the result arrives (or fails) at some later time.</p>
+
+<p>Common shapes: Spring WebFlux controllers returning <code>Mono</code>; AWS SDK v2 async clients that hand back <code>CompletableFuture</code>; gRPC stubs with callback-based APIs; reactive database drivers (R2DBC) that emit rows through <code>Publisher</code>; Kafka consumers with <code>onRecord</code> callbacks. Testing code that uses any of these is not about "when does my work run?" — it's about "how do I hand my code a fake async result that the test can fully control?"</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Real futures complete on background threads</h4>
+
+<p>A real <code>CompletableFuture</code> returned by a real collaborator is likely to complete on an I/O thread, a gRPC worker, or a reactor scheduler. Tests that call into your code and then check state immediately see the state before the async completion. Classic race: the test finishes before the collaborator delivers.</p>
+
+<h4>You can't join your way out of every problem</h4>
+
+<p>Adding <code>.get()</code> on the future blocks the test thread until completion. Sometimes this works. Often it creates new problems: deadlocks when the collaborator dispatches back onto the test thread, timeout flakiness when the collaborator is slow, or silent failure when the collaborator never completes. Blocking is a workaround, not a fix.</p>
+
+<h4>Callback APIs have no return value to wait on</h4>
+
+<p>A collaborator whose interface is <code>void fetch(String id, Callback callback)</code> doesn't give you a handle to await. Your test either sleeps, uses a <code>CountDownLatch</code> (which every test has to remember to count down correctly), or instruments the callback directly — none of which tests the code that's actually interesting.</p>
+
+<h4>Error paths fire at surprising times</h4>
+
+<p>A real failed future may propagate its exception through <code>handle</code>, <code>exceptionally</code>, <code>whenComplete</code>, or catch blocks down the chain. Reproducing this in a test with a real collaborator means making the collaborator fail in exactly the right way — which typically means controlling something outside the test's reach (a network, a downstream service).</p>
+
+<hr>
+
+<h2>The technique: Supply Pre-Completed Results</h2>
+
+<p><strong>Supply Pre-Completed Results</strong> extracts an interface for the async collaborator (often it's already defined by the library) and implements it in tests with fakes that return results <em>already resolved</em>. For <code>CompletableFuture</code>-returning methods, the fake returns <code>CompletableFuture.completedFuture(value)</code> (or <code>CompletableFuture.failedFuture(exception)</code>). For callback-based APIs, the fake invokes the callback synchronously before returning. For reactive streams, the fake emits onto a synchronous scheduler.</p>
+
+<p>When the collaborator's async is short-circuited to <em>"already done"</em>, the code under test proceeds as if there were no async at all. The chain of <code>.thenApply</code> and <code>.thenCompose</code> still runs — it just runs synchronously because each stage's prerequisite is immediately available. Assertions after the call see the final state without any waiting or blocking.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Your class depends on a collaborator with an async-shaped contract (future-returning, callback-based, or reactive).</li>
+  <li>You're testing your class's logic, not the collaborator's timing behavior.</li>
+  <li>The collaborator is (or can be made) behind an interface you control at the test boundary.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The thing you want to test <em>is</em> the timing behavior — e.g., "if the future takes longer than 2 seconds, we should time out". Use a controlled scheduler instead.</li>
+  <li>The code under test composes futures from many collaborators and you want to verify specific interleavings — integration tests with real schedulers are more appropriate.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>OrderFulfiller</code> uses an async payment gateway that returns <code>CompletableFuture</code>:</p>
+
+<pre><code><span class="kw">public interface</span> <span class="type">AsyncPaymentGateway</span> {
+    <span class="type">CompletableFuture</span>&lt;<span class="type">ChargeResult</span>&gt; <span class="fn">charge</span>(<span class="type">Money</span> amount, <span class="type">String</span> customerId);
+}
+
+<span class="kw">public class</span> <span class="type">OrderFulfiller</span> {
+    <span class="kw">private final</span> <span class="type">AsyncPaymentGateway</span> gateway;
+    <span class="kw">private final</span> <span class="type">OrderRepository</span> orders;
+
+    <span class="kw">public</span> <span class="fn">OrderFulfiller</span>(<span class="type">AsyncPaymentGateway</span> g, <span class="type">OrderRepository</span> o) {
+        <span class="kw">this</span>.gateway = g;
+        <span class="kw">this</span>.orders = o;
+    }
+
+    <span class="kw">public</span> <span class="type">CompletableFuture</span>&lt;<span class="type">Receipt</span>&gt; <span class="fn">fulfill</span>(<span class="type">Order</span> order) {
+        <span class="kw">return</span> gateway.charge(order.getTotal(), order.getCustomerId())
+            .thenApply(result -&gt; {
+                <span class="kw">if</span> (!result.ok()) <span class="kw">throw new</span> <span class="type">PaymentFailedException</span>(result.reason());
+                order.markPaid(result.transactionId());
+                orders.save(order);
+                <span class="kw">return new</span> <span class="type">Receipt</span>(order, result.transactionId());
+            });
+    }
+}</code></pre>
+
+<p>The interface already exists (<code>AsyncPaymentGateway</code>). The problem isn't extracting it; it's controlling what its <code>charge</code> method returns in tests — and specifically, doing so without async machinery that makes the test await something.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Confirm the collaborator has an interface (extract one if not — <em>Extract Interface</em> from Ch 25 applies).</li>
+  <li>In tests, implement the interface with a fake. For future-returning methods, return <code>CompletableFuture.completedFuture(value)</code> or <code>CompletableFuture.failedFuture(ex)</code>. For callback-based methods, invoke the callback synchronously before returning.</li>
+  <li>Drive the code under test. Because every stage's prerequisite is already resolved, each <code>.thenApply</code> runs immediately on the calling thread.</li>
+  <li>Assert on the returned future's state: <code>isDone()</code>, <code>join()</code> (safe — won't block), or <code>isCompletedExceptionally()</code>.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// Fake — returns results instantly, no thread switch</span>
+<span class="kw">public class</span> <span class="type">FakePaymentGateway</span> <span class="kw">implements</span> <span class="type">AsyncPaymentGateway</span> {
+    <span class="kw">public</span> <span class="type">Money</span> lastAmount;
+    <span class="kw">public</span> <span class="type">String</span> lastCustomer;
+    <span class="kw">private</span> <span class="type">ChargeResult</span> next = <span class="type">ChargeResult</span>.ok(<span class="str">"txn-1"</span>);
+    <span class="kw">private</span> <span class="type">RuntimeException</span> nextError;
+
+    <span class="kw">public void</span> <span class="fn">willReturn</span>(<span class="type">ChargeResult</span> r) { <span class="kw">this</span>.next = r; <span class="kw">this</span>.nextError = <span class="kw">null</span>; }
+    <span class="kw">public void</span> <span class="fn">willFailWith</span>(<span class="type">RuntimeException</span> e) { <span class="kw">this</span>.nextError = e; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">CompletableFuture</span>&lt;<span class="type">ChargeResult</span>&gt; <span class="fn">charge</span>(<span class="type">Money</span> amount, <span class="type">String</span> customerId) {
+        <span class="kw">this</span>.lastAmount = amount;
+        <span class="kw">this</span>.lastCustomer = customerId;
+        <span class="kw">if</span> (nextError != <span class="kw">null</span>) <span class="kw">return</span> <span class="type">CompletableFuture</span>.failedFuture(nextError);
+        <span class="kw">return</span> <span class="type">CompletableFuture</span>.completedFuture(next);
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">fulfillMarksOrderPaidAndSaves</span>() {
+    <span class="type">FakePaymentGateway</span> gw = <span class="kw">new</span> <span class="type">FakePaymentGateway</span>();
+    gw.willReturn(<span class="type">ChargeResult</span>.ok(<span class="str">"txn-abc"</span>));
+    <span class="type">InMemoryOrderRepository</span> repo = <span class="kw">new</span> <span class="type">InMemoryOrderRepository</span>();
+
+    <span class="type">OrderFulfiller</span> f = <span class="kw">new</span> <span class="type">OrderFulfiller</span>(gw, repo);
+    <span class="type">Order</span> order = <span class="type">Order</span>.of(<span class="str">"cust-1"</span>, <span class="type">Money</span>.usd(<span class="num">99.99</span>));
+
+    <span class="type">Receipt</span> receipt = f.fulfill(order).join(); <span class="cmt">// safe — future is already done</span>
+
+    <span class="fn">assertEquals</span>(<span class="str">"txn-abc"</span>, receipt.getTransactionId());
+    <span class="fn">assertTrue</span>(order.isPaid());
+    <span class="fn">assertSame</span>(order, repo.findById(order.getId()));
+    <span class="fn">assertEquals</span>(<span class="type">Money</span>.usd(<span class="num">99.99</span>), gw.lastAmount);
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">fulfillPropagatesPaymentGatewayFailures</span>() {
+    <span class="type">FakePaymentGateway</span> gw = <span class="kw">new</span> <span class="type">FakePaymentGateway</span>();
+    gw.willFailWith(<span class="kw">new</span> <span class="type">GatewayTimeoutException</span>(<span class="str">"upstream timed out"</span>));
+
+    <span class="type">OrderFulfiller</span> f = <span class="kw">new</span> <span class="type">OrderFulfiller</span>(gw, <span class="kw">new</span> <span class="type">InMemoryOrderRepository</span>());
+    <span class="type">CompletableFuture</span>&lt;<span class="type">Receipt</span>&gt; future = f.fulfill(<span class="type">Order</span>.of(<span class="str">"cust-1"</span>, <span class="type">Money</span>.usd(<span class="num">1</span>)));
+
+    <span class="fn">assertTrue</span>(future.isCompletedExceptionally());
+    <span class="type">CompletionException</span> ex = <span class="fn">assertThrows</span>(<span class="type">CompletionException</span>.<span class="kw">class</span>, future::join);
+    <span class="fn">assertInstanceOf</span>(<span class="type">GatewayTimeoutException</span>.<span class="kw">class</span>, ex.getCause());
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">fulfillRejectsPaymentDeclines</span>() {
+    <span class="type">FakePaymentGateway</span> gw = <span class="kw">new</span> <span class="type">FakePaymentGateway</span>();
+    gw.willReturn(<span class="type">ChargeResult</span>.declined(<span class="str">"insufficient funds"</span>));
+
+    <span class="type">OrderFulfiller</span> f = <span class="kw">new</span> <span class="type">OrderFulfiller</span>(gw, <span class="kw">new</span> <span class="type">InMemoryOrderRepository</span>());
+    <span class="type">CompletableFuture</span>&lt;<span class="type">Receipt</span>&gt; future = f.fulfill(<span class="type">Order</span>.of(<span class="str">"cust-1"</span>, <span class="type">Money</span>.usd(<span class="num">1</span>)));
+
+    <span class="fn">assertTrue</span>(future.isCompletedExceptionally());
+}</code></pre>
+
+<p>No thread switches, no waiting, no sleeps. The future chain runs to completion on the calling thread because every stage's prerequisite is already there. <code>.join()</code> is safe to call — it confirms completion but doesn't block.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Synchronous callbacks</h4>
+
+<p>For callback-based APIs, the fake invokes the callback inline before returning:</p>
+
+<pre><code><span class="kw">public interface</span> <span class="type">AsyncUserService</span> {
+    <span class="kw">void</span> <span class="fn">fetch</span>(<span class="type">String</span> id, <span class="type">Consumer</span>&lt;<span class="type">User</span>&gt; onSuccess, <span class="type">Consumer</span>&lt;<span class="type">Throwable</span>&gt; onError);
+}
+
+<span class="kw">public class</span> <span class="type">FakeAsyncUserService</span> <span class="kw">implements</span> <span class="type">AsyncUserService</span> {
+    <span class="kw">private</span> <span class="type">User</span> nextUser;
+    <span class="kw">public void</span> <span class="fn">willReturn</span>(<span class="type">User</span> u) { <span class="kw">this</span>.nextUser = u; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public void</span> <span class="fn">fetch</span>(<span class="type">String</span> id, <span class="type">Consumer</span>&lt;<span class="type">User</span>&gt; onSuccess, <span class="type">Consumer</span>&lt;<span class="type">Throwable</span>&gt; onError) {
+        <span class="kw">if</span> (nextUser != <span class="kw">null</span>) onSuccess.accept(nextUser);
+        <span class="kw">else</span> onError.accept(<span class="kw">new</span> <span class="type">NotFoundException</span>(id));
+    }
+}</code></pre>
+
+<p>The callback runs on the test thread, before <code>fetch</code> returns. Code under test sees the result immediately.</p>
+
+<h4>Reactor Test (StepVerifier) for Project Reactor</h4>
+
+<p>Projects using Reactor (<code>Mono</code>, <code>Flux</code>) have a standard test utility: <code>StepVerifier</code> in the <code>reactor-test</code> library. It drives the stream synchronously and makes assertions about emissions and timing. The underlying principle is the same — supply a source that's pre-resolved to the test's liking — but the tooling is specific to Reactor.</p>
+
+<h4>Extract Interface (Ch 25)</h4>
+
+<p>If the async collaborator doesn't already have an interface, use Feathers' <em>Extract Interface</em> first. Once the interface exists, pre-completion becomes the fake's business rather than the collaborator's.</p>
+
+<h4>A controlled scheduler for time-sensitive tests</h4>
+
+<p>When the test <em>wants</em> to verify behavior at specific async timings (timeouts, retries with backoff), pre-completed results don't help. Use a controllable scheduler — Guava's <code>DeterministicScheduler</code>, Reactor's <code>VirtualTimeScheduler</code>, or a hand-rolled time-stepping executor — and inject it alongside the clock.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Beware thread-confinement assumptions</h4>
+
+<p>Real code under test may assume that certain stages run on non-caller threads (UI frameworks especially). A pre-completed future causes those stages to run on the test thread, which may surface thread-confinement bugs. That's usually a <em>good</em> thing — the bugs are real and were invisible in production. Occasionally it's a bad thing — the test now fails for reasons unrelated to the behavior it's trying to verify. When this happens, the code's thread-confinement assumption needs to be made explicit, typically by dispatching back onto a known executor.</p>
+
+<h4>Don't mock <code>CompletableFuture</code> itself</h4>
+
+<p>Mocking <code>CompletableFuture</code> produces confusion — the class has dozens of methods that interact in subtle ways. Mock the <em>collaborator</em> that returns the future, and let the fake return real <code>CompletableFuture</code> instances (pre-completed). Real futures compose correctly with your <code>.thenApply</code> chain; mocked ones don't.</p>
+
+<h4>Delayed completion is sometimes intentional</h4>
+
+<p>If you need to test <em>"my code should still hold the lock while waiting for the future to complete"</em>, pre-completion defeats the test — the wait becomes instant. Use <code>new CompletableFuture&lt;&gt;()</code> (a future deliberately left incomplete) and complete it at the moment the test wants:</p>
+
+<pre><code><span class="type">CompletableFuture</span>&lt;<span class="type">ChargeResult</span>&gt; deferred = <span class="kw">new</span> <span class="type">CompletableFuture</span>&lt;&gt;();
+gateway.onCharge(() -&gt; deferred);
+
+<span class="cmt">// ... test setup, verify lock is held ...</span>
+deferred.complete(<span class="type">ChargeResult</span>.ok(<span class="str">"txn-1"</span>));
+<span class="cmt">// ... verify state after completion ...</span></code></pre>
+
+<h4>Don't test the library's async</h4>
+
+<p>Your tests should verify <em>your</em> code's behavior given various async outcomes. They shouldn't verify that <code>CompletableFuture</code> correctly propagates exceptions (it does), or that Reactor's operators respect backpressure (they do). Those are the library's tests to pass, not yours.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Threading / Async Dependency → Inject an Executor</em> is the sibling pairing for the <em>other</em> async shape: your own code producing async work. The two pages often apply to the same class — a service that consumes async results from one collaborator and produces async work for callers — with both injected collaborators getting test doubles. <em>Extract Interface</em> from Ch 25 is the Feathers technique this page's fix instantiates.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific technique relies on APIs (<code>CompletableFuture</code>, reactive streams) introduced after the book.
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Final / Sealed Dependency → Wrap with a Hand-Written Adapter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Final / Sealed Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Wrap with a Hand-Written Adapter</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Final / Sealed Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Wrap with a Hand-Written Adapter</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' <em>Subclass and Override Method</em> assumes the class isn't <code>final</code> and the method isn't <code>final</code>. <em>Extract Interface</em> assumes you own the source and can add <code>implements</code>. When both assumptions fail — which is the normal case for third-party library classes, many JDK types, and Kotlin-compiled code that defaults to final — neither technique applies. The modern Java workaround is an adapter you control, possibly combined with Mockito's bytecode-level <code>mock-maker-inline</code> extension when hand-writing an adapter would be overkill.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>final / sealed dependency</strong> exists when your code depends on a type that's closed to extension: marked <code>final</code>, marked <code>sealed</code> without your class in the <code>permits</code> list, or containing <code>final</code> methods at the points you need to override. JDK examples include <code>String</code>, <code>Integer</code>, <code>Pattern</code>, <code>LocalDateTime</code>, <code>URI</code>, and <code>Optional</code>. Third-party examples include many Guava types, vendor SDK clients, and Kotlin classes (which are final by default unless marked <code>open</code>).</p>
+
+<p>The seal is usually deliberate: immutability, security, performance, or API-evolution safety. The designers want to prevent misuse — but the same seal prevents the subclass-and-override trick that testability techniques lean on. Your code that collaborates with the sealed type has the whole class as a hard dependency, with no standard seam.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Subclass and Override Method doesn't compile</h4>
+
+<p>The single most common Feathers technique — make a test subclass, override the problem method — fails at the compiler. You get <code>Cannot inherit from final class</code> or <code>Cannot override the final method</code>. There's no way around it through ordinary Java.</p>
+
+<h4>Extract Interface requires modifying the class</h4>
+
+<p>To let a class implement an interface, you'd have to add <code>implements YourInterface</code> to its declaration. For a class you don't own, that's impossible. You can extract an interface with the same <em>shape</em> as the class's API, but the sealed class itself won't implement it, so you can't pass a sealed instance where the interface is expected.</p>
+
+<h4>Standard mocking frameworks have limits</h4>
+
+<p>Default Mockito (without the inline mock-maker) can't mock <code>final</code> classes. Bytecode-generation libraries it relies on — CGLIB, Byte Buddy with the default mock-maker — create subclasses, which fails on sealed types. Mockito's <code>mock-maker-inline</code> extension uses the JVM's instrumentation API to rewrite bytecode and can mock final classes, but it adds startup cost and fragility.</p>
+
+<h4>Construction is often awkward too</h4>
+
+<p>Sealed types frequently have non-public or context-dependent constructors. Even if you could subclass, constructing real instances in tests may require setting up the context the class's design expected.</p>
+
+<hr>
+
+<h2>The technique: Wrap with a Hand-Written Adapter</h2>
+
+<p><strong>Wrap with a Hand-Written Adapter</strong> creates a type you control between your code and the sealed type. You define an interface declaring just the methods your code uses. You write an adapter class that implements the interface by delegating to the sealed type. Your code accepts the interface, not the sealed type. In production, construct the adapter around a real instance; in tests, implement the interface directly with a fake.</p>
+
+<p>This is <em>Adapt Parameter</em> from Ch 25 applied specifically when the motivation is the seal rather than the class's size or API surface. The mechanical moves are the same; the decision criteria are different (finality forces your hand; API surface is a judgment call).</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Your code depends on a <code>final</code> or <code>sealed</code> class (or one with <code>final</code> methods you need to vary).</li>
+  <li>You can change your code to accept an interface instead of the concrete type.</li>
+  <li>The class's useful surface (to your code) is small — a few methods, not the whole API.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class is <em>barely</em> used (one call, no varying behavior needed) — consider <em>Parameterize Method</em> or simply accepting the dependency without mocking.</li>
+  <li>The class is pervasive through your codebase (e.g., <code>String</code>) — wrapping it would be absurd. These are typically already testable by just passing different values.</li>
+  <li>Mockito's inline mock-maker is already in the project and fast enough — pragmatic shortcut, discussed below.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>InvoicePrinter</code> depends on a vendor <code>PdfRenderer</code> that's declared <code>final</code>:</p>
+
+<pre><code><span class="cmt">// Vendor library, not yours</span>
+<span class="kw">public final class</span> <span class="type">PdfRenderer</span> {
+    <span class="kw">public</span> <span class="fn">PdfRenderer</span>(<span class="type">PdfConfig</span> config) { <span class="cmt">// heavy init, loads fonts, etc. */</span> }
+    <span class="kw">public byte</span>[] <span class="fn">render</span>(<span class="type">Document</span> doc) { <span class="cmt">// real rendering */</span> }
+    <span class="kw">public void</span> <span class="fn">attachFont</span>(<span class="type">Font</span> font) { <span class="cmt">/* ... */</span> }
+}
+
+<span class="kw">public class</span> <span class="type">InvoicePrinter</span> {
+    <span class="kw">private final</span> <span class="type">PdfRenderer</span> renderer;
+
+    <span class="kw">public</span> <span class="fn">InvoicePrinter</span>(<span class="type">PdfRenderer</span> renderer) { <span class="kw">this</span>.renderer = renderer; }
+
+    <span class="kw">public byte</span>[] <span class="fn">print</span>(<span class="type">Invoice</span> invoice) {
+        <span class="type">Document</span> doc = buildDocument(invoice);
+        <span class="kw">return</span> renderer.render(doc);
+    }
+}</code></pre>
+
+<p>You can't subclass <code>PdfRenderer</code>. You can't add an interface to it. Instantiating a real one in tests is slow and loads fonts from disk. The document-building logic — the part worth testing — is hostage to the renderer.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List the methods your code calls on the sealed type. For <code>InvoicePrinter</code>, just <code>render</code>.</li>
+  <li>Define an interface containing those methods, named for the role (<code>DocumentRenderer</code>) rather than the vendor.</li>
+  <li>Write a small adapter implementing the interface by delegating to the sealed type. Give it a constructor that takes the sealed instance.</li>
+  <li>Change your code's constructor parameter type from the sealed class to the interface.</li>
+  <li>At production construction sites, wrap the sealed instance: <code>new InvoicePrinter(new VendorPdfAdapter(pdfRenderer))</code>.</li>
+  <li>In tests, implement the interface directly with a fake.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// Interface you own</span>
+<span class="kw">public interface</span> <span class="type">DocumentRenderer</span> {
+    <span class="kw">byte</span>[] <span class="fn">render</span>(<span class="type">Document</span> doc);
+}
+
+<span class="cmt">// Adapter that delegates to the sealed vendor type</span>
+<span class="kw">public class</span> <span class="type">VendorPdfAdapter</span> <span class="kw">implements</span> <span class="type">DocumentRenderer</span> {
+    <span class="kw">private final</span> <span class="type">PdfRenderer</span> vendor;
+
+    <span class="kw">public</span> <span class="fn">VendorPdfAdapter</span>(<span class="type">PdfRenderer</span> vendor) { <span class="kw">this</span>.vendor = vendor; }
+
+    <span class="ann">@Override</span>
+    <span class="kw">public byte</span>[] <span class="fn">render</span>(<span class="type">Document</span> doc) { <span class="kw">return</span> vendor.render(doc); }
+}
+
+<span class="cmt">// Code under test takes the interface</span>
+<span class="kw">public class</span> <span class="type">InvoicePrinter</span> {
+    <span class="kw">private final</span> <span class="type">DocumentRenderer</span> renderer;
+
+    <span class="kw">public</span> <span class="fn">InvoicePrinter</span>(<span class="type">DocumentRenderer</span> renderer) { <span class="kw">this</span>.renderer = renderer; }
+
+    <span class="kw">public byte</span>[] <span class="fn">print</span>(<span class="type">Invoice</span> invoice) {
+        <span class="type">Document</span> doc = buildDocument(invoice);
+        <span class="kw">return</span> renderer.render(doc);
+    }
+}
+
+<span class="cmt">// Test — no vendor library, no font loading</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">printRendersBuiltDocument</span>() {
+    <span class="type">DocumentRenderer</span> fake = <span class="kw">new</span> <span class="type">DocumentRenderer</span>() {
+        <span class="kw">public</span> <span class="type">Document</span> captured;
+        <span class="ann">@Override</span>
+        <span class="kw">public byte</span>[] <span class="fn">render</span>(<span class="type">Document</span> doc) {
+            captured = doc;
+            <span class="kw">return</span> <span class="kw">new byte</span>[] { <span class="num">0x25</span>, <span class="num">0x50</span>, <span class="num">0x44</span>, <span class="num">0x46</span> }; <span class="cmt">// "%PDF"</span>
+        }
+    };
+
+    <span class="type">InvoicePrinter</span> printer = <span class="kw">new</span> <span class="type">InvoicePrinter</span>(fake);
+    <span class="kw">byte</span>[] pdf = printer.print(<span class="type">Invoice</span>.sample());
+
+    <span class="fn">assertEquals</span>(<span class="num">4</span>, pdf.length);
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Mockito <code>mock-maker-inline</code></h4>
+
+<p>A pragmatic shortcut when you have many sealed types and writing adapters for each would be costly. Adding <code>org.mockito:mockito-inline</code> to the build (or enabling the inline mock-maker in <code>mockito-core</code> 5+) lets Mockito mock <code>final</code> classes via JVM instrumentation. Tests can then write <code>PdfRenderer renderer = mock(PdfRenderer.class)</code> directly.</p>
+
+<p>Costs: slightly slower test startup, occasional compatibility issues across JVM versions, and a framework dependency the test reads like <em>"this class shouldn't normally be mockable; Mockito is doing something special"</em>. The hand-written adapter is cleaner for the small number of sealed types your code genuinely depends on; the inline mock-maker is a reasonable fallback for the rest.</p>
+
+<h4>Adapt Parameter (the Ch 25 sibling)</h4>
+
+<p>This page's technique is functionally identical to <em>Adapt Parameter</em> — the difference is motivation. <em>Adapt Parameter</em> is typically described for wide API surfaces where an interface extraction is impractical; the final/sealed page emphasizes that extraction is <em>impossible</em>, not merely awkward. When in doubt, read both pages.</p>
+
+<h4>Subclass and Override Method with <code>open</code> Kotlin classes</h4>
+
+<p>If the sealed type comes from a Kotlin module you control, changing the class declaration from default-final to <code>open</code> removes the problem at the source. This is often the right fix when the code is yours and the seal was accidental rather than deliberate. For third-party classes, this path isn't available.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Name the interface by role</h4>
+
+<p>Don't call the interface <code>IPdfRenderer</code> or <code>PdfRendererWrapper</code>. Call it by what it does in your domain: <code>DocumentRenderer</code>, <code>InvoiceRenderer</code>, <code>ReportExporter</code>. The adapter name can reference the vendor (<code>VendorPdfAdapter</code>); the interface should name the role.</p>
+
+<h4>Keep the adapter thin</h4>
+
+<p>Each method on the adapter is one line — a direct delegate to the sealed type. Any caching, error translation, or additional logic belongs in a higher layer. A fat adapter grows its own testability problems.</p>
+
+<h4>Library upgrades become easier</h4>
+
+<p>A secondary benefit worth noting: when the vendor releases a new major version with breaking changes, only the adapter needs to track those changes. Your core logic keeps compiling unchanged. This often matters more than the testing benefit.</p>
+
+<h4>Don't wrap JDK value types</h4>
+
+<p>Classes like <code>String</code>, <code>Integer</code>, <code>LocalDate</code>, <code>UUID</code> are final but don't present testability problems — they're values, not collaborators. You "fake" them by passing different values. No wrapper needed.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Library / Framework Dependency → Adapt Parameter</em> is the closest sibling — same mechanical fix, usually applied to wide-surface framework types rather than specifically to sealed ones. <em>Inheritance Dependency → Compose Around the Inherited Type</em> handles the opposite problem: you're forced to <em>extend</em> a type rather than forbidden from extending it.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific handling of sealed types is a post-2004 Java concern (widespread <code>final</code> use, Kotlin's default-final classes, Mockito's inline mock-maker).
+</footer>
+
+</body>
+</html>

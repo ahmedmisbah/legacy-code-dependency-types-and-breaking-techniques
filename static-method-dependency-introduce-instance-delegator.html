@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Static Method Dependency → Introduce Instance Delegator</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Static Method Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Introduce Instance Delegator</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Static Method Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Introduce Instance Delegator</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>static method dependency</strong> happens when the code under test calls a <code>static</code> method on another class directly: <code>TaxTables.lookupRate(state)</code>, <code>Logging.log(msg)</code>, <code>FileUtils.readText(path)</code>. The call is resolved at compile time against a specific class — there is no object in between, no polymorphism, no virtual dispatch. Tests have nowhere to intervene.</p>
+
+<p>Static calls are a special case of global reference dependency, but they deserve their own treatment because the fix is different. A global reference is usually a <em>value</em> you can wrap; a static call is a <em>behavior</em> that you want to substitute. The technique for behavior is to give the call an object seam.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Static calls can't be polymorphically replaced</h4>
+
+<p>In Java, a call like <code>TaxTables.lookupRate(state)</code> is bound at compile time to exactly that class's method. You can't override it through inheritance; you can't substitute a different implementation through an interface. Every run of the code executes the same code path.</p>
+
+<h4>Mocking frameworks generally can't help</h4>
+
+<p>Mockito, by default, can't mock static methods. Tools that can (PowerMock, Mockito's <code>mockStatic</code>) work by manipulating the classloader or bytecode, which is slow, fragile, and confusing. When tests use heavyweight mocking tricks to paper over design problems, the design usually gets worse, not better.</p>
+
+<h4>The call site is a dead end</h4>
+
+<p>There's no parameter to swap, no field to replace, no constructor to parameterize. The static call is baked into the method body, and tests of that method inherit whatever the static does — including real I/O, real database reads, or real external API calls.</p>
+
+<h4>Error paths become unreachable</h4>
+
+<p>If the static method throws on certain inputs, the only way to exercise that error path is to produce those inputs. If it reads from the filesystem, the test has to arrange specific files. The combinatorial cost of covering failure modes spirals.</p>
+
+<hr>
+
+<h2>The technique: Introduce Instance Delegator</h2>
+
+<p><strong>Introduce Instance Delegator</strong> creates an object seam around a static call. You add an instance method — either on the class under test itself or on a new helper class — that delegates to the static method. The production code path is unchanged (the delegator still calls the static). In tests, a subclass or a fake helper overrides the delegator method and returns whatever the test needs.</p>
+
+<p>The technique doesn't remove the static method, and it doesn't fix the fundamental design issue of a utility class full of statics. What it does is turn one specific static call site into an object call, at which point every other technique in the catalog becomes available.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Code under test calls a static method whose behavior you need to vary in tests.</li>
+  <li>You own the class under test (you can add a new instance method to it) or you own a helper class you can route calls through.</li>
+  <li>You want a minimal change — this technique adds one method without restructuring the caller.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The static method's logic is simple and self-contained — <em>Expose Static Method</em> might let you test the logic directly without routing through an instance.</li>
+  <li>The value returned by the static is already computed elsewhere and could be passed in — <em>Parameterize Method</em> is simpler.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>InvoiceCalculator</code> calls <code>TaxTables.lookupRate</code> statically:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">TaxTables</span> {
+    <span class="kw">public static</span> <span class="type">BigDecimal</span> <span class="fn">lookupRate</span>(<span class="type">String</span> state) {
+        <span class="cmt">// reads a configuration file from disk, caches, etc.</span>
+        <span class="kw">return</span> loadFromFile(state);
+    }
+}
+
+<span class="kw">public class</span> <span class="type">InvoiceCalculator</span> {
+    <span class="kw">public</span> <span class="type">BigDecimal</span> <span class="fn">totalWithTax</span>(<span class="type">Order</span> order) {
+        <span class="type">BigDecimal</span> rate = <span class="type">TaxTables</span>.lookupRate(order.getState());
+        <span class="kw">return</span> order.subtotal().multiply(<span class="type">BigDecimal</span>.<span class="type">ONE</span>.add(rate));
+    }
+}</code></pre>
+
+<p>Testing <code>totalWithTax</code> requires a real configuration file reachable from the test runner, with the specific tax rates the test expects.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the static method call you want to neutralize.</li>
+  <li>Add a <code>protected</code> instance method on the class under test. Give it the same signature as the static but make it an instance method. Its body is a single line delegating to the static.</li>
+  <li>Replace the static call in the method body with a call to the new instance method.</li>
+  <li>In tests, subclass the class under test and override the delegator method to return canned values.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">InvoiceCalculator</span> {
+    <span class="kw">public</span> <span class="type">BigDecimal</span> <span class="fn">totalWithTax</span>(<span class="type">Order</span> order) {
+        <span class="type">BigDecimal</span> rate = lookupRate(order.getState());
+        <span class="kw">return</span> order.subtotal().multiply(<span class="type">BigDecimal</span>.<span class="type">ONE</span>.add(rate));
+    }
+
+    <span class="cmt">// The delegator: production still calls the static;</span>
+    <span class="cmt">// tests override this method to return canned rates.</span>
+    <span class="kw">protected</span> <span class="type">BigDecimal</span> <span class="fn">lookupRate</span>(<span class="type">String</span> state) {
+        <span class="kw">return</span> <span class="type">TaxTables</span>.lookupRate(state);
+    }
+}
+
+<span class="cmt">// Test subclass</span>
+<span class="kw">class</span> <span class="type">TestableInvoiceCalculator</span> <span class="kw">extends</span> <span class="type">InvoiceCalculator</span> {
+    <span class="kw">public</span> <span class="type">String</span> lookedUpState;
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected</span> <span class="type">BigDecimal</span> <span class="fn">lookupRate</span>(<span class="type">String</span> state) {
+        lookedUpState = state;
+        <span class="kw">return new</span> <span class="type">BigDecimal</span>(<span class="str">"0.10"</span>);
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">totalWithTaxAppliesStateRate</span>() {
+    <span class="type">TestableInvoiceCalculator</span> calc = <span class="kw">new</span> <span class="type">TestableInvoiceCalculator</span>();
+    <span class="type">Order</span> order = <span class="type">Order</span>.of(<span class="type">Money</span>.usd(<span class="num">100</span>), <span class="str">"CA"</span>);
+
+    <span class="type">BigDecimal</span> result = calc.totalWithTax(order);
+
+    <span class="fn">assertEquals</span>(<span class="str">"CA"</span>, calc.lookedUpState);
+    <span class="fn">assertEquals</span>(<span class="kw">new</span> <span class="type">BigDecimal</span>(<span class="str">"110.00"</span>), result);
+}</code></pre>
+
+<p>No files are read. No tax tables are consulted. The test is deterministic, fast, and isolated.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Expose Static Method</h4>
+
+<p>When the logic inside the static method doesn't depend on its class's state (no private fields accessed), you can sometimes test the static directly rather than working around it. Feathers' <em>Expose Static Method</em> technique flips the problem: instead of wrapping the static call in an instance method, extract the static's body into a separate static that takes everything it needs as parameters, then test that directly.</p>
+
+<p>This applies when you're the author of both the caller and the called static, and you realise the static is doing pure computation that just happened to be stuck on a utility class. After applying the technique, you can test the extracted piece in isolation without any delegator at all.</p>
+
+<h4>Parameterize Method</h4>
+
+<p>If the value computed by the static is already known (or easily computed) at the call site of the method under test, don't bother with a delegator — just pass the value in as a parameter. This is the simplest possible fix and should always be considered first for one-off situations.</p>
+
+<pre><code><span class="cmt">// Before</span>
+<span class="kw">public</span> <span class="type">BigDecimal</span> <span class="fn">totalWithTax</span>(<span class="type">Order</span> order) {
+    <span class="type">BigDecimal</span> rate = <span class="type">TaxTables</span>.lookupRate(order.getState());
+    <span class="kw">return</span> order.subtotal().multiply(<span class="type">BigDecimal</span>.<span class="type">ONE</span>.add(rate));
+}
+
+<span class="cmt">// After — caller passes the rate in</span>
+<span class="kw">public</span> <span class="type">BigDecimal</span> <span class="fn">totalWithTax</span>(<span class="type">Order</span> order, <span class="type">BigDecimal</span> rate) {
+    <span class="kw">return</span> order.subtotal().multiply(<span class="type">BigDecimal</span>.<span class="type">ONE</span>.add(rate));
+}</code></pre>
+
+<p>This pushes the static call up one level (the caller still has to make it), so the problem doesn't disappear — it migrates. That can be a win if the caller has better options for replacing the static.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't over-proliferate delegators</h4>
+
+<p>If a class has ten static calls, wrapping each in its own delegator method clutters the class. At that point, consider a different strategy: create a new helper class (sometimes called a <em>seam class</em> or <em>gateway</em>) that owns all the static calls as instance methods. Inject the helper through the constructor and call it instead of the statics. This is effectively <em>Encapsulate Global References</em> applied to behavior.</p>
+
+<h4>The static is still there</h4>
+
+<p>Like most Feathers techniques, Introduce Instance Delegator buys you a test seam without fixing the underlying problem. Once tests cover the class, consider eliminating the static entirely: convert the utility to an interface and inject an implementation.</p>
+
+<h4>Don't mock the delegator with a library</h4>
+
+<p>The delegator is designed for plain subclassing and method override. Using Mockito to stub it works but obscures the intent — a reader seeing the test sees Mockito magic, not a simple override. Prefer a hand-written test subclass unless there's a strong reason otherwise.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> For singletons (static accessors to a shared object, rather than static methods performing a computation), use <em>Introduce Static Setter</em>. For raw globals (static fields, environment variables), use <em>Encapsulate Global References</em>.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

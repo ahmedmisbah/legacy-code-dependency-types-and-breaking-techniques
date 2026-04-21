@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instance Variable Dependency → Extract and Override Getter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Instance Variable Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Extract and Override Getter</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Instance Variable Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract and Override Getter</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>An <strong>instance variable dependency</strong> exists when a class has a field holding a problematic collaborator, and methods inside the class read that field directly. The field may be initialized in the constructor, in a setter, at declaration time, or lazily inside a method. The salient trait is that code inside the class writes <code>this.thing.doSomething()</code> — with direct field access, no indirection, no seam.</p>
+
+<p>This is closely related to constructor dependency but not the same: a constructor dependency concerns how the field is <em>set</em>; an instance variable dependency concerns how the field is <em>used</em>. A class can have its field injected cleanly via a parameterized constructor and still be untestable if some method uses the field through <code>this.field</code> in a way a test can't influence.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Direct field access is unreplaceable</h4>
+
+<p>When a method uses <code>this.emailSender.send(...)</code>, there's no polymorphism. The call targets whatever instance the field points to. A test can't intervene without either replacing the field value (setter, Parameterize Constructor, Supersede Instance Variable) or intercepting the access itself.</p>
+
+<h4>Lazy initialization hides the dependency</h4>
+
+<p>A field initialized on first access (inside a getter, inside the method that uses it) is invisible to constructor injection. The class appears to have no collaborator — until the first call to a particular method, at which point the real collaborator springs into existence. Constructor-based techniques miss this case entirely.</p>
+
+<h4>Multiple methods use the same field</h4>
+
+<p>If five methods all access <code>this.cache</code>, and you want to fake the cache in tests, you need a solution that works for all five. Touching each call site is noisy and error-prone.</p>
+
+<h4>Subclassing partially helps, but not for fields</h4>
+
+<p>Java lets you override methods in a subclass, but not fields. A test subclass can't simply declare <code>private EmailSender emailSender = new FakeEmailSender();</code> and have the superclass see it — the superclass sees its own field. The seam has to go through a method.</p>
+
+<hr>
+
+<h2>The technique: Extract and Override Getter</h2>
+
+<p><strong>Extract and Override Getter</strong> replaces direct field access with calls to a protected getter method. Once every usage routes through the getter, a test subclass can override the getter to return a fake, without touching the field itself. The field remains private; the access path becomes polymorphic.</p>
+
+<p>This technique is particularly useful for the lazy-initialization case: move the lazy-init logic into the getter, and the subclass can supply a value before the lazy-init runs.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A class has a field holding a problematic collaborator, and multiple methods access it directly.</li>
+  <li>The class isn't <code>final</code>, and a test subclass is feasible.</li>
+  <li>You can't easily rewire construction to inject the dependency (otherwise <em>Parameterize Constructor</em> is cleaner).</li>
+  <li>Lazy initialization is in play and you need to intercept before it runs.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The field is only used in one method — <em>Extract and Override Call</em> around the one use is simpler.</li>
+  <li>You can change the constructor — <em>Parameterize Constructor</em> keeps the design cleaner and avoids subclassing.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>WorkflowRunner</code> lazily initializes an email sender and uses it from multiple methods:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">WorkflowRunner</span> {
+    <span class="kw">private</span> <span class="type">EmailSender</span> emailSender;
+
+    <span class="kw">public void</span> <span class="fn">notifyStarted</span>(<span class="type">User</span> user) {
+        <span class="kw">if</span> (emailSender == <span class="kw">null</span>) emailSender = <span class="kw">new</span> <span class="type">SmtpEmailSender</span>();
+        emailSender.send(user.getEmail(), <span class="str">"Workflow started"</span>);
+    }
+
+    <span class="kw">public void</span> <span class="fn">notifyCompleted</span>(<span class="type">User</span> user, <span class="type">Result</span> result) {
+        <span class="kw">if</span> (emailSender == <span class="kw">null</span>) emailSender = <span class="kw">new</span> <span class="type">SmtpEmailSender</span>();
+        emailSender.send(user.getEmail(), result.summary());
+    }
+}</code></pre>
+
+<p>There is no place a test can inject a fake. The field goes from <code>null</code> to a real <code>SmtpEmailSender</code> the moment either method is called.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the field and every place it's read.</li>
+  <li>Add a <code>protected</code> getter method. Move lazy-initialization logic into the getter.</li>
+  <li>Replace every direct field read with a call to the getter.</li>
+  <li>In tests, subclass the class and override the getter to return a fake. The field itself is never accessed.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">WorkflowRunner</span> {
+    <span class="kw">private</span> <span class="type">EmailSender</span> emailSender;
+
+    <span class="kw">public void</span> <span class="fn">notifyStarted</span>(<span class="type">User</span> user) {
+        getEmailSender().send(user.getEmail(), <span class="str">"Workflow started"</span>);
+    }
+
+    <span class="kw">public void</span> <span class="fn">notifyCompleted</span>(<span class="type">User</span> user, <span class="type">Result</span> result) {
+        getEmailSender().send(user.getEmail(), result.summary());
+    }
+
+    <span class="kw">protected</span> <span class="type">EmailSender</span> <span class="fn">getEmailSender</span>() {
+        <span class="kw">if</span> (emailSender == <span class="kw">null</span>) emailSender = <span class="kw">new</span> <span class="type">SmtpEmailSender</span>();
+        <span class="kw">return</span> emailSender;
+    }
+}
+
+<span class="cmt">// Test subclass — supplies a fake before lazy init can run</span>
+<span class="kw">class</span> <span class="type">TestableWorkflowRunner</span> <span class="kw">extends</span> <span class="type">WorkflowRunner</span> {
+    <span class="kw">public</span> <span class="type">FakeEmailSender</span> fake = <span class="kw">new</span> <span class="type">FakeEmailSender</span>();
+    <span class="ann">@Override</span>
+    <span class="kw">protected</span> <span class="type">EmailSender</span> <span class="fn">getEmailSender</span>() { <span class="kw">return</span> fake; }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">notifyStartedSendsMessageToUser</span>() {
+    <span class="type">TestableWorkflowRunner</span> runner = <span class="kw">new</span> <span class="type">TestableWorkflowRunner</span>();
+    runner.notifyStarted(<span class="type">User</span>.withEmail(<span class="str">"a@b.com"</span>));
+
+    <span class="fn">assertEquals</span>(<span class="str">"a@b.com"</span>, runner.fake.lastRecipient);
+    <span class="fn">assertEquals</span>(<span class="str">"Workflow started"</span>, runner.fake.lastMessage);
+}</code></pre>
+
+<p>The real <code>SmtpEmailSender</code> is never constructed — the lazy-init branch inside <code>getEmailSender</code> is dead code as far as the test is concerned, because the override bypasses it.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Supersede Instance Variable</h4>
+
+<p>When the class can't be subclassed (or when you don't want to introduce a test subclass), add a test-only setter that replaces the field after construction. The real collaborator is still constructed — you just overwrite it before the test exercises the code.</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">WorkflowRunner</span> {
+    <span class="kw">private</span> <span class="type">EmailSender</span> emailSender = <span class="kw">new</span> <span class="type">SmtpEmailSender</span>();
+
+    <span class="cmt">// Deliberately ugly name — marks as test-only</span>
+    <span class="kw">public void</span> <span class="fn">supersedeEmailSender</span>(<span class="type">EmailSender</span> replacement) {
+        <span class="kw">this</span>.emailSender = replacement;
+    }
+
+    <span class="cmt">// ... methods still use the field directly ...</span>
+}</code></pre>
+
+<p>Weaker than Extract and Override Getter because the real collaborator is constructed (with whatever side effects that entails), but useful when subclassing isn't available. Feathers considers it a last resort.</p>
+
+<h4>Parameterize Constructor</h4>
+
+<p>When you can change the constructor, inject the collaborator directly. The class no longer owns its own creation and doesn't need a getter seam at all. This is the design most codebases want to end up at — treat Extract and Override Getter as a stepping-stone toward constructor injection once tests are safe.</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">WorkflowRunner</span> {
+    <span class="kw">private final</span> <span class="type">EmailSender</span> emailSender;
+
+    <span class="kw">public</span> <span class="fn">WorkflowRunner</span>(<span class="type">EmailSender</span> emailSender) {
+        <span class="kw">this</span>.emailSender = emailSender;
+    }
+
+    <span class="kw">public void</span> <span class="fn">notifyStarted</span>(<span class="type">User</span> user) {
+        emailSender.send(user.getEmail(), <span class="str">"Workflow started"</span>);
+    }
+}</code></pre>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't forget lazy init in the getter</h4>
+
+<p>If the original code relied on lazy initialization, the getter must preserve it. A getter that returns <code>null</code> the first time is a regression, not a refactoring.</p>
+
+<h4>Watch for init order with subclasses</h4>
+
+<p>Overriding a getter that's called from a superclass constructor runs <em>before</em> the subclass's fields are initialized. If the subclass stores the fake in a field and the override reads that field, it will be <code>null</code> during construction. Keep the override self-contained, or use a <code>static</code> holder if you need external configurability.</p>
+
+<h4>Every read needs to go through the getter</h4>
+
+<p>One direct field read that slips through the refactoring is a silent bug waiting to surface. Lean on the compiler: make the field <code>private</code> (if it isn't already) and visible only to the getter. If another method reaches past the getter, the compiler will flag it.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Extract and Override Factory Method</em> is the variant for classes where the dependency is a collaborator <em>created</em> by the class (inside a constructor or init method) rather than one that's <em>held</em> as a field with lazy init. The two techniques have the same shape — extract to a method, override in a subclass — but serve different init patterns.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

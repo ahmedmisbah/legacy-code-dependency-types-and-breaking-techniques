@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Filesystem Dependency → Abstract the Filesystem</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Filesystem Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Abstract the Filesystem</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Filesystem Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Abstract the Filesystem</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' catalog doesn't name a technique specifically for filesystem access. The closest matches are <em>Extract Interface</em> or <em>Adapt Parameter</em> — wrap I/O operations in a narrow interface you own. What's new is that modern Java offers two canonical tools: the <code>java.nio.file.FileSystem</code> abstraction (Java 7, 2011) and Jimfs, Google's in-memory <code>FileSystem</code> implementation designed specifically for tests.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>filesystem dependency</strong> appears wherever code reads or writes files directly: <code>Files.readAllBytes(path)</code>, <code>new FileInputStream(file)</code>, <code>Files.write(path, bytes)</code>, <code>File.createTempFile(...)</code>, <code>Files.walk(...)</code>. Each of these touches the real filesystem — opens real file handles, consumes real disk I/O, may be subject to real permissions, real disk-full conditions, real filesystem case-sensitivity rules.</p>
+
+<p>Common places this bites: configuration loading at startup, certificate and key file access, report output, batch file processing, log file rotation, resource extraction from archives, cache files, anywhere code does import/export. The testing problem is the same in every case — real I/O leaks into the test, and tests need real files arranged in real directories before they can run.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Real I/O is slow and flaky</h4>
+
+<p>A unit test that reads a 1 KB config file still pays a syscall, a disk seek (on spinning media), filesystem cache warm-up, and operating-system overhead. Multiply across hundreds of tests and the suite goes from seconds to minutes. Under load — on a shared CI runner — timings get noisy and previously-green tests go yellow.</p>
+
+<h4>Tests pollute each other</h4>
+
+<p>If two tests write to <code>/tmp/out.csv</code>, ordering starts mattering. If one test forgets to clean up, the next inherits its files. Parallel test execution is unsafe by default — you have to manually partition directories or serialize the suite.</p>
+
+<h4>Setup becomes a chore</h4>
+
+<p>Every test of a file-reading class needs a real file to exist at a specific path with specific content. That means either checking test fixtures into version control (which accumulate forever) or constructing the file in the test's <code>@Before</code> (which is noisy). Both make tests harder to read and maintain.</p>
+
+<h4>Error paths are effectively unreachable</h4>
+
+<p>To test <em>"what happens when the disk is full"</em>, you'd need to actually fill the disk. <em>"What happens on a permission error"</em>, <em>"what if the file is locked by another process"</em>, <em>"what if the path is longer than the filesystem allows"</em> — all similarly impractical with a real filesystem. An abstracted filesystem can be programmed to throw at will.</p>
+
+<h4>Platform differences surface in production</h4>
+
+<p>Real filesystems vary: Windows uses case-insensitive paths and different separators; macOS may normalize Unicode filenames; some networked filesystems have timing quirks. Tests that pass on one platform fail subtly on another. An in-memory filesystem gives predictable semantics regardless of host OS.</p>
+
+<hr>
+
+<h2>The technique: Abstract the Filesystem</h2>
+
+<p><strong>Abstract the Filesystem</strong> has two common shapes. The first — the narrow approach — introduces a small interface (<code>FileStore</code>, <code>ConfigReader</code>, <code>ReportWriter</code>) capturing just the I/O operations the class actually uses. Production implements the interface by delegating to <code>java.nio.file</code>; tests implement it with an in-memory map.</p>
+
+<p>The second — the broad approach — uses Java NIO's built-in <code>java.nio.file.FileSystem</code> abstraction. Your code receives a <code>FileSystem</code> instance (or accepts <code>Path</code> values from one) and uses it for everything. In production, pass <code>FileSystems.getDefault()</code>. In tests, pass a Jimfs-backed filesystem: <code>Jimfs.newFileSystem(Configuration.unix())</code> gives you a complete in-memory POSIX-like filesystem with no test-visible differences from the real thing.</p>
+
+<p>The narrow approach adds less machinery and is right for code that does a few specific things with files. The broad approach is right for code that does substantial filesystem work (walks trees, manages temp directories, deals with multiple paths) where you want the full API surface available to tests.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A class does file I/O that tests need to cover deterministically.</li>
+  <li>Tests would otherwise require fixture files, temp-dir management, or platform-specific setup.</li>
+  <li>You want to cover error paths (disk full, permission denied, missing file) that real filesystems resist producing.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class's purpose <em>is</em> real filesystem behavior — a disk-backup tool, for instance. Tests should exercise the real filesystem (carefully scoped to temp dirs).</li>
+  <li>File I/O is already behind a well-tested library call that has its own test seam — don't double-wrap.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>ConfigLoader</code> reads directly via <code>java.nio.file</code>:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">ConfigLoader</span> {
+    <span class="kw">public</span> <span class="type">Config</span> <span class="fn">load</span>(<span class="type">String</span> configDir) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="type">Path</span> main = <span class="type">Paths</span>.get(configDir, <span class="str">"app.yaml"</span>);
+        <span class="type">Path</span> overrides = <span class="type">Paths</span>.get(configDir, <span class="str">"overrides.yaml"</span>);
+
+        <span class="type">String</span> mainYaml = <span class="type">Files</span>.readString(main);
+        <span class="type">Config</span> config = <span class="type">Config</span>.parse(mainYaml);
+
+        <span class="kw">if</span> (<span class="type">Files</span>.exists(overrides)) {
+            <span class="type">String</span> ovYaml = <span class="type">Files</span>.readString(overrides);
+            config = config.mergeWith(<span class="type">Config</span>.parse(ovYaml));
+        }
+        <span class="kw">return</span> config;
+    }
+}</code></pre>
+
+<p>Testing this means creating real files in a real directory. Testing the error case (main file missing, overrides file malformed) means arranging those conditions on disk. Parallel tests must not share the config dir.</p>
+
+<hr>
+
+<h2>Steps (broad approach — Jimfs)</h2>
+
+<ol class="steps">
+  <li>Identify the methods and classes that currently call <code>Paths.get</code> or the static <code>Files</code> methods.</li>
+  <li>Accept a <code>FileSystem</code> (or <code>Path</code> values derived from one) as a constructor parameter. Default to <code>FileSystems.getDefault()</code> for callers who don't care.</li>
+  <li>Replace <code>Paths.get(...)</code> with <code>fileSystem.getPath(...)</code>.</li>
+  <li>Keep using <code>Files.readString</code>, <code>Files.exists</code>, etc. — they work against any <code>FileSystem</code> as long as the <code>Path</code> values come from that <code>FileSystem</code>.</li>
+  <li>In tests, construct a Jimfs filesystem, populate it with the files the test needs, and pass it to the class under test.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">ConfigLoader</span> {
+    <span class="kw">private final</span> <span class="type">FileSystem</span> fs;
+
+    <span class="kw">public</span> <span class="fn">ConfigLoader</span>(<span class="type">FileSystem</span> fs) { <span class="kw">this</span>.fs = fs; }
+    <span class="kw">public</span> <span class="fn">ConfigLoader</span>() { <span class="kw">this</span>(<span class="type">FileSystems</span>.getDefault()); }
+
+    <span class="kw">public</span> <span class="type">Config</span> <span class="fn">load</span>(<span class="type">String</span> configDir) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="type">Path</span> main = fs.getPath(configDir, <span class="str">"app.yaml"</span>);
+        <span class="type">Path</span> overrides = fs.getPath(configDir, <span class="str">"overrides.yaml"</span>);
+
+        <span class="type">String</span> mainYaml = <span class="type">Files</span>.readString(main);
+        <span class="type">Config</span> config = <span class="type">Config</span>.parse(mainYaml);
+
+        <span class="kw">if</span> (<span class="type">Files</span>.exists(overrides)) {
+            config = config.mergeWith(<span class="type">Config</span>.parse(<span class="type">Files</span>.readString(overrides)));
+        }
+        <span class="kw">return</span> config;
+    }
+}
+
+<span class="cmt">// Test — entirely in memory, no real disk, runs in milliseconds</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">loadAppliesOverridesWhenPresent</span>() <span class="kw">throws</span> <span class="type">IOException</span> {
+    <span class="type">FileSystem</span> fs = <span class="type">Jimfs</span>.newFileSystem(<span class="type">Configuration</span>.unix());
+    <span class="type">Path</span> dir = fs.getPath(<span class="str">"/conf"</span>);
+    <span class="type">Files</span>.createDirectory(dir);
+    <span class="type">Files</span>.writeString(dir.resolve(<span class="str">"app.yaml"</span>), <span class="str">"port: 80"</span>);
+    <span class="type">Files</span>.writeString(dir.resolve(<span class="str">"overrides.yaml"</span>), <span class="str">"port: 8080"</span>);
+
+    <span class="type">Config</span> cfg = <span class="kw">new</span> <span class="type">ConfigLoader</span>(fs).load(<span class="str">"/conf"</span>);
+
+    <span class="fn">assertEquals</span>(<span class="num">8080</span>, cfg.getPort());
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">loadThrowsWhenMainConfigMissing</span>() <span class="kw">throws</span> <span class="type">IOException</span> {
+    <span class="type">FileSystem</span> fs = <span class="type">Jimfs</span>.newFileSystem(<span class="type">Configuration</span>.unix());
+    <span class="type">Files</span>.createDirectory(fs.getPath(<span class="str">"/conf"</span>));
+
+    <span class="fn">assertThrows</span>(<span class="type">NoSuchFileException</span>.<span class="kw">class</span>,
+        () -&gt; <span class="kw">new</span> <span class="type">ConfigLoader</span>(fs).load(<span class="str">"/conf"</span>));
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract Interface (narrow approach)</h4>
+
+<p>When the class uses a small, well-defined slice of filesystem operations, skip the full <code>FileSystem</code> abstraction and define your own interface:</p>
+
+<pre><code><span class="kw">public interface</span> <span class="type">FileStore</span> {
+    <span class="type">String</span> <span class="fn">read</span>(<span class="type">String</span> path) <span class="kw">throws</span> <span class="type">IOException</span>;
+    <span class="kw">boolean</span> <span class="fn">exists</span>(<span class="type">String</span> path);
+}
+
+<span class="kw">public class</span> <span class="type">NioFileStore</span> <span class="kw">implements</span> <span class="type">FileStore</span> {
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">String</span> <span class="fn">read</span>(<span class="type">String</span> path) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="kw">return</span> <span class="type">Files</span>.readString(<span class="type">Paths</span>.get(path));
+    }
+    <span class="ann">@Override</span>
+    <span class="kw">public boolean</span> <span class="fn">exists</span>(<span class="type">String</span> path) { <span class="kw">return</span> <span class="type">Files</span>.exists(<span class="type">Paths</span>.get(path)); }
+}
+
+<span class="cmt">// Test fake — backed by a plain Map</span>
+<span class="kw">public class</span> <span class="type">InMemoryFileStore</span> <span class="kw">implements</span> <span class="type">FileStore</span> {
+    <span class="kw">private final</span> <span class="type">Map</span>&lt;<span class="type">String</span>, <span class="type">String</span>&gt; files = <span class="kw">new</span> <span class="type">HashMap</span>&lt;&gt;();
+    <span class="kw">public void</span> <span class="fn">put</span>(<span class="type">String</span> path, <span class="type">String</span> content) { files.put(path, content); }
+    <span class="ann">@Override</span>
+    <span class="kw">public</span> <span class="type">String</span> <span class="fn">read</span>(<span class="type">String</span> path) <span class="kw">throws</span> <span class="type">IOException</span> {
+        <span class="type">String</span> c = files.get(path);
+        <span class="kw">if</span> (c == <span class="kw">null</span>) <span class="kw">throw new</span> <span class="type">NoSuchFileException</span>(path);
+        <span class="kw">return</span> c;
+    }
+    <span class="ann">@Override</span>
+    <span class="kw">public boolean</span> <span class="fn">exists</span>(<span class="type">String</span> path) { <span class="kw">return</span> files.containsKey(path); }
+}</code></pre>
+
+<p>Less infrastructure, less dependency (no Jimfs), less API surface to learn. Preferred when the class genuinely only does a few things with files.</p>
+
+<h4>JUnit 5 @TempDir</h4>
+
+<p>Not an abstraction at all, but a pragmatic middle ground: JUnit 5's <code>@TempDir</code> annotation gives each test a fresh temporary directory, automatically cleaned up afterward. It doesn't remove the real-I/O cost, but it eliminates the cross-test-pollution problem and is standard JUnit with no extra dependencies. Use it when the class under test really needs real filesystem behavior, but not when pure logic would benefit from Jimfs.</p>
+
+<h4>Extract and Override Call</h4>
+
+<p>For a single problematic file operation in an otherwise testable method, Feathers' <em>Extract and Override Call</em> is a lighter touch than the full abstraction: wrap the one call in a protected method, override in a test subclass.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Jimfs is an additional dependency</h4>
+
+<p>Jimfs is a Google-maintained library, not part of the JDK. Teams that minimize dependencies may prefer the narrow interface approach. For teams that already depend on Guava ecosystem libraries, Jimfs is essentially free.</p>
+
+<h4>Mind the filesystem semantics you're emulating</h4>
+
+<p>Jimfs ships with <code>Configuration.unix()</code>, <code>Configuration.windows()</code>, and <code>Configuration.osX()</code>. Pick the one that matches production, or your tests may pass on the test's filesystem but fail on production's. If production runs on Linux, use <code>Configuration.unix()</code>.</p>
+
+<h4>Watch for Path-to-String conversions</h4>
+
+<p>A <code>Path</code> from a <code>Jimfs</code> filesystem is not interchangeable with a <code>Path</code> from <code>FileSystems.getDefault()</code>. If your class stringifies a <code>Path</code> and later reconstructs it via <code>Paths.get</code>, the reconstructed path points at the real filesystem, not the test one. Keep <code>Path</code> values flowing through the injected <code>FileSystem</code> rather than round-tripping them through strings.</p>
+
+<h4>Real-I/O integration tests still have their place</h4>
+
+<p>Unit tests with an in-memory filesystem are fast and deterministic; they don't replace integration tests that verify actual I/O behavior. Keep a small set of tests that use the real filesystem to catch platform-specific issues that in-memory abstractions don't reproduce (file locking semantics, networked filesystems, permission edge cases).</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Extract Interface</em> and <em>Adapt Parameter</em> are the Ch 25 techniques this page's narrow-approach variant instantiates. <em>Library / Framework Dependency → Adapt Parameter</em> is the right page if your filesystem code is actually using a vendor SDK (S3 client, HDFS client) rather than plain Java I/O.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific techniques (<code>FileSystem</code> abstraction, Jimfs, <code>@TempDir</code>) are post-2004 Java conventions.
+</footer>
+
+</body>
+</html>

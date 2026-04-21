@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Global Reference Dependency → Encapsulate Global References</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Global Reference Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Encapsulate Global References</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Global Reference Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Encapsulate Global References</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>global reference dependency</strong> exists when code directly reads from or writes to process-wide state — static fields, environment variables, system properties, the system clock. In Java this looks like <code>System.getenv("DB_URL")</code>, <code>Configuration.INSTANCE.get("timeout")</code>, <code>System.currentTimeMillis()</code>, or a plain <code>public static</code> field that someone is mutating. The reference lives outside the class's object graph, so no constructor argument, no setter, and no subclass override will move it.</p>
+
+<p>Globals are seductive because they dodge the boilerplate of passing values through layers. That convenience is precisely the testability problem: there's no seam at all. Every caller and every test that exercises the class touches the same global, with all the implications that carries.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>There is no injection point</h4>
+
+<p>Constructor dependencies can be parameterized. Parameter dependencies can be extracted into interfaces. Global references have nowhere to inject — the code asks the JVM itself for the value, and the JVM hands back whatever is there.</p>
+
+<h4>Tests leak into each other</h4>
+
+<p>If one test sets <code>System.setProperty("mode", "A")</code> and the next reads <code>System.getProperty("mode")</code>, the second test inherits the first one's state. Test order starts mattering. Parallel test execution becomes unsafe. The hard-to-diagnose failures always happen on the CI server and never locally.</p>
+
+<h4>You can't observe changes</h4>
+
+<p>If the code writes to the global, the test can read it back — but only if the test knows the exact global name. Observing <em>which</em> globals were touched, and in what order, requires intrusive instrumentation.</p>
+
+<h4>The dependency is invisible at the API</h4>
+
+<p>A class with a plain no-arg constructor and no exotic parameter types looks self-contained, but it secretly needs <code>CONFIG_PATH</code> set, a network-reachable DNS server, and a system clock in UTC. Deploying it to a new environment surfaces each missing global as a runtime failure.</p>
+
+<div class="note">
+<strong>The deeper problem.</strong> Globals are a design decision that affects testability, not a testability problem that happens to show up in the design. Encapsulate Global References doesn't eliminate globals; it puts them behind an object so the rest of the code stops noticing.
+</div>
+
+<hr>
+
+<h2>The technique: Encapsulate Global References</h2>
+
+<p><strong>Encapsulate Global References</strong> gathers the globals that a class uses into a new class — conventionally named after the role the globals play together (<code>Environment</code>, <code>SystemClock</code>, <code>RuntimeConfig</code>). Accesses to the raw globals become method calls on an instance of that new class. Once the globals are behind an object, every other technique in the catalog becomes available: you can parameterize the constructor to accept the holder, extract an interface from the holder to fake it, subclass it, and so on.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>Code reads or writes <code>System.*</code>, <code>Environment.*</code>, or static fields of shared configuration classes.</li>
+  <li>The globals form a natural group (all about time, all about environment, all about configuration) — the wrapper's name writes itself.</li>
+  <li>Multiple classes touch the same globals — one encapsulation benefits all of them.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The global is a true singleton-style service (<code>getInstance()</code>) — use <em>Introduce Static Setter</em> instead.</li>
+  <li>A single method uses a single global value — <em>Parameterize Method</em> is simpler.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>PricingService</code> reads environment variables, system properties, and the clock directly:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PricingService</span> {
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order) {
+        <span class="kw">double</span> taxRate = <span class="type">Double</span>.parseDouble(<span class="type">System</span>.getenv(<span class="str">"TAX_RATE"</span>));
+        <span class="kw">boolean</span> isHoliday = <span class="type">Boolean</span>.parseBoolean(<span class="type">System</span>.getProperty(<span class="str">"holiday.mode"</span>));
+        <span class="type">Instant</span> now = <span class="type">Instant</span>.now();
+
+        <span class="type">Money</span> base = order.subtotal();
+        <span class="kw">if</span> (isHoliday &amp;&amp; now.atZone(<span class="type">ZoneOffset</span>.UTC).getMonth() == <span class="type">Month</span>.DECEMBER) {
+            base = base.times(<span class="num">0.90</span>);
+        }
+        <span class="kw">return</span> base.plus(base.times(taxRate));
+    }
+}</code></pre>
+
+<p>Testing this means setting and unsetting environment variables (which Java makes deliberately awkward), setting and clearing system properties, and having the test run at a specific time of year. Every test becomes a fight with the JVM's global state.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List every global reference the class uses. Group them by role (environment config, clock, runtime flags).</li>
+  <li>Create a new class named after the role. Give it methods that return the values, initially just delegating to the same globals.</li>
+  <li>Add a field in the original class that holds an instance of the new class. Default-initialize it to a real instance.</li>
+  <li>Replace every direct global access in the original class with a call on the new field.</li>
+  <li>Apply <em>Parameterize Constructor</em> so tests can inject a different instance.</li>
+  <li>Optionally, extract an interface from the holder and accept the interface instead of the concrete class.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// The wrapper — still consults the real globals by default</span>
+<span class="kw">public class</span> <span class="type">Environment</span> {
+    <span class="kw">public double</span> <span class="fn">taxRate</span>() {
+        <span class="kw">return</span> <span class="type">Double</span>.parseDouble(<span class="type">System</span>.getenv(<span class="str">"TAX_RATE"</span>));
+    }
+    <span class="kw">public boolean</span> <span class="fn">holidayMode</span>() {
+        <span class="kw">return</span> <span class="type">Boolean</span>.parseBoolean(<span class="type">System</span>.getProperty(<span class="str">"holiday.mode"</span>));
+    }
+    <span class="kw">public</span> <span class="type">Instant</span> <span class="fn">now</span>() {
+        <span class="kw">return</span> <span class="type">Instant</span>.now();
+    }
+}
+
+<span class="kw">public class</span> <span class="type">PricingService</span> {
+    <span class="kw">private final</span> <span class="type">Environment</span> env;
+
+    <span class="kw">public</span> <span class="fn">PricingService</span>(<span class="type">Environment</span> env) {
+        <span class="kw">this</span>.env = env;
+    }
+
+    <span class="kw">public</span> <span class="type">PricingService</span>() { <span class="kw">this</span>(<span class="kw">new</span> <span class="type">Environment</span>()); }
+
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order) {
+        <span class="type">Money</span> base = order.subtotal();
+        <span class="kw">if</span> (env.holidayMode() &amp;&amp; env.now().atZone(<span class="type">ZoneOffset</span>.UTC).getMonth() == <span class="type">Month</span>.DECEMBER) {
+            base = base.times(<span class="num">0.90</span>);
+        }
+        <span class="kw">return</span> base.plus(base.times(env.taxRate()));
+    }
+}
+
+<span class="cmt">// Test — no environment variables, no system properties, no wall clock</span>
+<span class="kw">public class</span> <span class="type">FakeEnvironment</span> <span class="kw">extends</span> <span class="type">Environment</span> {
+    <span class="kw">public double</span> tax = <span class="num">0.1</span>;
+    <span class="kw">public boolean</span> holiday = <span class="kw">false</span>;
+    <span class="kw">public</span> <span class="type">Instant</span> time = <span class="type">Instant</span>.parse(<span class="str">"2026-06-15T00:00:00Z"</span>);
+
+    <span class="ann">@Override</span> <span class="kw">public double</span> <span class="fn">taxRate</span>() { <span class="kw">return</span> tax; }
+    <span class="ann">@Override</span> <span class="kw">public boolean</span> <span class="fn">holidayMode</span>() { <span class="kw">return</span> holiday; }
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">Instant</span> <span class="fn">now</span>() { <span class="kw">return</span> time; }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">holidayDiscountOnlyAppliesInDecember</span>() {
+    <span class="type">FakeEnvironment</span> env = <span class="kw">new</span> <span class="type">FakeEnvironment</span>();
+    env.holiday = <span class="kw">true</span>;
+    env.time = <span class="type">Instant</span>.parse(<span class="str">"2026-06-15T00:00:00Z"</span>);
+
+    <span class="type">PricingService</span> svc = <span class="kw">new</span> <span class="type">PricingService</span>(env);
+    <span class="type">Money</span> total = svc.finalPrice(<span class="type">Order</span>.of(<span class="type">Money</span>.usd(<span class="num">100</span>)));
+
+    <span class="fn">assertEquals</span>(<span class="type">Money</span>.usd(<span class="num">110</span>), total); <span class="cmt">// no holiday discount outside Dec</span>
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Replace Global Reference with Getter</h4>
+
+<p>A lighter-touch alternative. Instead of extracting a separate wrapper class, introduce a protected getter inside the same class that returns the global value. Subclass the class in tests and override the getter.</p>
+
+<p class="before-after">Before — direct global access:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PricingService</span> {
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order) {
+        <span class="kw">double</span> taxRate = <span class="type">Double</span>.parseDouble(<span class="type">System</span>.getenv(<span class="str">"TAX_RATE"</span>));
+        <span class="kw">return</span> order.subtotal().plus(order.subtotal().times(taxRate));
+    }
+}</code></pre>
+
+<p class="before-after">After — access via an overridable getter:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PricingService</span> {
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order) {
+        <span class="kw">return</span> order.subtotal().plus(order.subtotal().times(getTaxRate()));
+    }
+
+    <span class="kw">protected double</span> <span class="fn">getTaxRate</span>() {
+        <span class="kw">return</span> <span class="type">Double</span>.parseDouble(<span class="type">System</span>.getenv(<span class="str">"TAX_RATE"</span>));
+    }
+}
+
+<span class="cmt">// Test subclass</span>
+<span class="kw">class</span> <span class="type">TestablePricingService</span> <span class="kw">extends</span> <span class="type">PricingService</span> {
+    <span class="ann">@Override</span> <span class="kw">protected double</span> <span class="fn">getTaxRate</span>() { <span class="kw">return</span> <span class="num">0.1</span>; }
+}</code></pre>
+
+<p>This is quicker than full encapsulation, but it spreads the workaround across every class that uses the global instead of consolidating in one place. Prefer Encapsulate Global References when multiple classes touch the same globals.</p>
+
+<h4>Parameterize Method</h4>
+
+<p>If a single method uses a single global, and the calling context already knows the value, the simplest fix is to pass it in as an argument. No wrapper class, no subclass — just an extra parameter.</p>
+
+<pre><code><span class="cmt">// Before</span>
+<span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order) {
+    <span class="kw">double</span> taxRate = <span class="type">Double</span>.parseDouble(<span class="type">System</span>.getenv(<span class="str">"TAX_RATE"</span>));
+    <span class="kw">return</span> order.subtotal().times(<span class="num">1</span> + taxRate);
+}
+
+<span class="cmt">// After</span>
+<span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order, <span class="kw">double</span> taxRate) {
+    <span class="kw">return</span> order.subtotal().times(<span class="num">1</span> + taxRate);
+}</code></pre>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't just rename the problem</h4>
+
+<p>A wrapper whose methods simply call the same globals buys nothing if you never vary the wrapper. The point of encapsulation is to make substitution possible — pair with <em>Parameterize Constructor</em> and an interface (or a subclass override) or the exercise was decorative.</p>
+
+<h4>Group by cohesion, not by expedience</h4>
+
+<p>Stuffing every global your class uses into one <code>Globals</code> class produces a grab-bag that's hard to fake. Split by role: a <code>Clock</code> wrapper for time, a <code>ConfigSource</code> wrapper for configuration, an <code>Environment</code> wrapper for process info. Each narrow wrapper can be faked independently in the tests that need it.</p>
+
+<h4>Java's standard Clock</h4>
+
+<p>For the specific case of time, don't roll your own wrapper — <code>java.time.Clock</code> already exists, is injectable, and has test utilities built in (<code>Clock.fixed</code>, <code>Clock.offset</code>). Use it as the model for other Encapsulate Global References applications.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Introduce Static Setter</em> addresses a closely related problem — a globally accessible object reached through <code>getInstance()</code> — by adding a static setter for tests. Use it when the global <em>is</em> a service object, rather than a raw value.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

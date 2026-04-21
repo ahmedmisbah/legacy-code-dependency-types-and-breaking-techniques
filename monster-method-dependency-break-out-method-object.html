@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monster-Method Dependency → Break Out Method Object</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Monster-Method Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Break Out Method Object</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Monster-Method Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Break Out Method Object</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>monster-method dependency</strong> is what happens when a single method has grown large enough that the dependencies within it are <em>its local variables</em>. The method is hundreds of lines long. Locals are declared at the top and mutated throughout. The midpoint of the method reads values that six other places have written. Pulling any piece out fails because the piece references half a dozen locals that are defined and mutated elsewhere in the same method.</p>
+
+<p>The normal extract-method refactoring requires identifying inputs and outputs — what locals does the piece read, what locals does it write? In a monster method, the answer is often "all of them." Every attempt to extract produces a method with fifteen parameters and multiple out-parameters. The tangle resists decomposition.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>You can't test pieces</h4>
+
+<p>The method only has one public entry point. Everything interesting happens in the middle, surrounded by setup and teardown. A test can only invoke the whole thing; it can't reach in and verify one sub-computation.</p>
+
+<h4>Setup to exercise the whole method is enormous</h4>
+
+<p>Monster methods typically accept only a handful of parameters but manipulate a lot of state. To drive any particular branch deep in the method, you have to construct inputs that will cause all the earlier branches to go the way you want. Tests become Rube Goldberg machines.</p>
+
+<h4>Coverage is all-or-nothing</h4>
+
+<p>You can't get 80% of the method under test and fix 20% later. Either the whole thing runs in your test or nothing does. And if anything in the method has a problematic dependency — a static call, a file write, a network request — that dependency applies to every test of every path.</p>
+
+<h4>Refactoring is risky without tests</h4>
+
+<p>The classic chicken-and-egg: the method needs tests before you refactor it, and it needs refactoring before you can write tests. Break Out Method Object is the way out — a refactoring that is safe to apply without pre-existing tests, because it's mechanical and preserves behavior.</p>
+
+<hr>
+
+<h2>The technique: Break Out Method Object</h2>
+
+<p><strong>Break Out Method Object</strong> promotes a single method to its own class. The method's locals become fields of the new class. The method's body stays intact, now operating on fields instead of locals. With locals turned into fields, extract-method refactorings become trivial — each extracted helper is a method on the same class, reading and writing the same fields, with zero parameters. Decomposition that was impossible inside the monster method becomes routine inside the method object.</p>
+
+<p>The original method is reduced to a single line: construct the method object, call its <code>run</code> method (or whatever you named it), return the result. The original class and all its callers are unchanged.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A method is large enough that extract-method is blocked by the tangle of locals.</li>
+  <li>You want to test sub-parts of the method's logic independently after decomposition.</li>
+  <li>Individual dependency-breaking techniques (Extract and Override Call, etc.) aren't enough because the problems are scattered throughout.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The method is already reasonably sized — use plain extract-method instead.</li>
+  <li>The method is monstrous but mostly straight-line code with no branching — a linear sequence of <em>independent</em> steps can often be extracted directly without the method-object detour.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>InvoiceBatch.process</code> is a giant method with locals that every piece reads and writes:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">InvoiceBatch</span> {
+    <span class="kw">public</span> <span class="type">BatchReport</span> <span class="fn">process</span>(<span class="type">List</span>&lt;<span class="type">Invoice</span>&gt; invoices, <span class="type">TaxTables</span> tax) {
+        <span class="type">BigDecimal</span> runningTotal = <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+        <span class="type">BigDecimal</span> runningTax = <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+        <span class="kw">int</span> skipped = <span class="num">0</span>;
+        <span class="type">List</span>&lt;<span class="type">String</span>&gt; warnings = <span class="kw">new</span> <span class="type">ArrayList</span>&lt;&gt;();
+        <span class="type">Map</span>&lt;<span class="type">String</span>, <span class="type">BigDecimal</span>&gt; perState = <span class="kw">new</span> <span class="type">HashMap</span>&lt;&gt;();
+
+        <span class="kw">for</span> (<span class="type">Invoice</span> inv : invoices) {
+            <span class="kw">if</span> (inv.getTotal().signum() &lt; <span class="num">0</span>) {
+                warnings.add(<span class="str">"negative:"</span> + inv.getId());
+                skipped++;
+                <span class="kw">continue</span>;
+            }
+
+            <span class="type">BigDecimal</span> rate = tax.rateFor(inv.getState());
+            <span class="kw">if</span> (rate == <span class="kw">null</span>) {
+                warnings.add(<span class="str">"no-rate:"</span> + inv.getState());
+                skipped++;
+                <span class="kw">continue</span>;
+            }
+
+            <span class="type">BigDecimal</span> lineTax = inv.getTotal().multiply(rate);
+            runningTax = runningTax.add(lineTax);
+            runningTotal = runningTotal.add(inv.getTotal()).add(lineTax);
+
+            perState.merge(inv.getState(), inv.getTotal(), <span class="type">BigDecimal</span>::add);
+            <span class="cmt">// ... 80 more lines of similar logic ...</span>
+        }
+
+        <span class="type">BigDecimal</span> avg = skipped &lt; invoices.size()
+            ? runningTotal.divide(<span class="kw">new</span> <span class="type">BigDecimal</span>(invoices.size() - skipped), <span class="type">RoundingMode</span>.<span class="type">HALF_UP</span>)
+            : <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+
+        <span class="kw">return new</span> <span class="type">BatchReport</span>(runningTotal, runningTax, skipped, warnings, perState, avg);
+    }
+}</code></pre>
+
+<p>Every sub-computation (validation, rate lookup, line-tax calculation, running-total update, per-state accumulation, final averaging) reads and writes the same shared locals. Pulling one out means passing five parameters in and returning four values.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Create a new class named for the operation: <code>InvoiceBatchProcessor</code>. Give it a constructor that accepts the original method's parameters.</li>
+  <li>Copy every local variable of the original method to a field on the new class.</li>
+  <li>Copy the body of the original method into a method on the new class (typically named <code>run</code>, <code>process</code>, or <code>execute</code>), adjusting local references to field references.</li>
+  <li>Have the method return whatever the original method returned.</li>
+  <li>Replace the original method's body with a single line: <code>return new InvoiceBatchProcessor(invoices, tax).run();</code>.</li>
+  <li>Now that locals are fields, extract coherent pieces into their own methods freely. The extracted methods have no parameters — they operate on the shared fields.</li>
+  <li>Write tests for the new class, both end-to-end and against the extracted helpers where useful.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">InvoiceBatchProcessor</span> {
+    <span class="kw">private final</span> <span class="type">List</span>&lt;<span class="type">Invoice</span>&gt; invoices;
+    <span class="kw">private final</span> <span class="type">TaxTables</span> tax;
+
+    <span class="cmt">// former locals, now fields</span>
+    <span class="kw">private</span> <span class="type">BigDecimal</span> runningTotal = <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+    <span class="kw">private</span> <span class="type">BigDecimal</span> runningTax = <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+    <span class="kw">private int</span> skipped = <span class="num">0</span>;
+    <span class="kw">private final</span> <span class="type">List</span>&lt;<span class="type">String</span>&gt; warnings = <span class="kw">new</span> <span class="type">ArrayList</span>&lt;&gt;();
+    <span class="kw">private final</span> <span class="type">Map</span>&lt;<span class="type">String</span>, <span class="type">BigDecimal</span>&gt; perState = <span class="kw">new</span> <span class="type">HashMap</span>&lt;&gt;();
+
+    <span class="kw">public</span> <span class="fn">InvoiceBatchProcessor</span>(<span class="type">List</span>&lt;<span class="type">Invoice</span>&gt; invoices, <span class="type">TaxTables</span> tax) {
+        <span class="kw">this</span>.invoices = invoices;
+        <span class="kw">this</span>.tax = tax;
+    }
+
+    <span class="kw">public</span> <span class="type">BatchReport</span> <span class="fn">run</span>() {
+        <span class="kw">for</span> (<span class="type">Invoice</span> inv : invoices) {
+            <span class="kw">if</span> (!accept(inv)) <span class="kw">continue</span>;
+            applyLine(inv);
+        }
+        <span class="kw">return</span> buildReport();
+    }
+
+    <span class="kw">private boolean</span> <span class="fn">accept</span>(<span class="type">Invoice</span> inv) {
+        <span class="kw">if</span> (inv.getTotal().signum() &lt; <span class="num">0</span>) {
+            warnings.add(<span class="str">"negative:"</span> + inv.getId());
+            skipped++;
+            <span class="kw">return false</span>;
+        }
+        <span class="kw">if</span> (tax.rateFor(inv.getState()) == <span class="kw">null</span>) {
+            warnings.add(<span class="str">"no-rate:"</span> + inv.getState());
+            skipped++;
+            <span class="kw">return false</span>;
+        }
+        <span class="kw">return true</span>;
+    }
+
+    <span class="kw">private void</span> <span class="fn">applyLine</span>(<span class="type">Invoice</span> inv) {
+        <span class="type">BigDecimal</span> lineTax = inv.getTotal().multiply(tax.rateFor(inv.getState()));
+        runningTax = runningTax.add(lineTax);
+        runningTotal = runningTotal.add(inv.getTotal()).add(lineTax);
+        perState.merge(inv.getState(), inv.getTotal(), <span class="type">BigDecimal</span>::add);
+    }
+
+    <span class="kw">private</span> <span class="type">BatchReport</span> <span class="fn">buildReport</span>() {
+        <span class="type">BigDecimal</span> avg = skipped &lt; invoices.size()
+            ? runningTotal.divide(<span class="kw">new</span> <span class="type">BigDecimal</span>(invoices.size() - skipped), <span class="type">RoundingMode</span>.<span class="type">HALF_UP</span>)
+            : <span class="type">BigDecimal</span>.<span class="type">ZERO</span>;
+        <span class="kw">return new</span> <span class="type">BatchReport</span>(runningTotal, runningTax, skipped, warnings, perState, avg);
+    }
+}
+
+<span class="cmt">// The original class becomes a thin wrapper</span>
+<span class="kw">public class</span> <span class="type">InvoiceBatch</span> {
+    <span class="kw">public</span> <span class="type">BatchReport</span> <span class="fn">process</span>(<span class="type">List</span>&lt;<span class="type">Invoice</span>&gt; invoices, <span class="type">TaxTables</span> tax) {
+        <span class="kw">return new</span> <span class="type">InvoiceBatchProcessor</span>(invoices, tax).run();
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">skipsNegativeInvoicesAndRecordsWarning</span>() {
+    <span class="type">InvoiceBatchProcessor</span> p = <span class="kw">new</span> <span class="type">InvoiceBatchProcessor</span>(
+        <span class="type">List</span>.of(<span class="type">Invoice</span>.of(<span class="str">"I-1"</span>, <span class="kw">new</span> <span class="type">BigDecimal</span>(<span class="str">"-10"</span>), <span class="str">"CA"</span>)),
+        <span class="type">TaxTables</span>.withRates(<span class="type">Map</span>.of(<span class="str">"CA"</span>, <span class="kw">new</span> <span class="type">BigDecimal</span>(<span class="str">"0.1"</span>))));
+
+    <span class="type">BatchReport</span> report = p.run();
+
+    <span class="fn">assertEquals</span>(<span class="num">1</span>, report.getSkipped());
+    <span class="fn">assertEquals</span>(<span class="type">List</span>.of(<span class="str">"negative:I-1"</span>), report.getWarnings());
+}</code></pre>
+
+<p>Each extracted helper (<code>accept</code>, <code>applyLine</code>, <code>buildReport</code>) is short, has no parameters, and is easy to read. Because they all operate on fields, more aggressive decomposition becomes possible later without the parameter-list explosion that blocked it inside the original method.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Expose Static Method</h4>
+
+<p>Sometimes inside the monster method you find a block that doesn't touch any locals — a piece of pure computation sitting in the middle of the tangle. That block doesn't need the full method-object treatment. Extract it as a <code>static</code> method that takes its inputs as parameters, returns its outputs, and can be tested in isolation. A method-object refactor often surfaces several such opportunities after the main extraction is done.</p>
+
+<h4>Extract and Override Call (inside the method object)</h4>
+
+<p>Once the monster method is a class, every dependency-breaking technique in the catalog applies to it just like any other class. If the method object makes a problematic call (a network request, a file write), apply <em>Extract and Override Call</em> on it exactly as you would on any ordinary class.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Preserve behavior during the promotion</h4>
+
+<p>The promotion itself should not change behavior. Locals become fields, but the code path stays identical. Resist the temptation to fix bugs, rename variables, or restructure branches until the method object exists and tests are in place. Mix one kind of change at a time.</p>
+
+<h4>Watch out for closure over the outer class</h4>
+
+<p>If the monster method accesses fields or methods of the class it was on, the method object needs access to those too. Either pass the outer object in as a constructor argument, or extract the pieces the method uses (via <em>Extract Interface</em> or simple delegation) so the method object depends on something narrower than the whole outer class.</p>
+
+<h4>One method object per method</h4>
+
+<p>It's tempting to consolidate: "I have two monster methods, let me make one <code>BatchOperations</code> class with both." Resist. A method object embodies the state of exactly one method. Two methods together produce a new blended class with all the entanglement risks the original methods had. Keep them separate.</p>
+
+<h4>Final constants aren't locals</h4>
+
+<p>Constants declared at the top of the method (<code>final int MAX = 10</code>) don't need to become fields; they can be constants of the new class. Distinguish between mutable working state (becomes fields) and read-only configuration (becomes constants or constructor parameters).</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> For a dependency that's concentrated at a single call rather than spread through a method, <em>Extract and Override Call</em> is the surgical tool. For a class full of monster methods (rather than one method inside an otherwise reasonable class), consider applying <em>Push Down Dependency</em> to the class first — sometimes a "monster method" is really "one method that couldn't be tested because its class couldn't be constructed in tests."
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

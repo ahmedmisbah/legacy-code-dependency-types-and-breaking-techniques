@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Threading / Concurrency Dependency → Inject an Executor</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Threading / Concurrency Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Modern Java technique:</strong> Inject an Executor</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Threading / Concurrency Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Inject an Executor</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>Not in Chapter 25.</strong> Feathers' catalog treats concurrency as a design concern that resists individual dependency-breaking techniques. The modern Java answer — inject the <code>Executor</code> so tests can run submitted tasks synchronously — applies Feathers' <em>Parameterize Constructor</em> principle to the specific case of async work. <code>CompletableFuture</code> (Java 8, 2014) and <code>Executors</code> (Java 5, 2004) give this approach a standard shape the book couldn't have covered.
+</div>
+
+<div class="note">
+<strong>Scope: "where does work run?"</strong> This page covers the case where <em>your code produces async work</em> — spawns threads, submits to executors, calls <code>CompletableFuture.runAsync</code>. The sibling page <em>Async Result Dependency → Supply Pre-Completed Results</em> covers the opposite shape: your code <em>consumes</em> async results from a collaborator that returns <code>CompletableFuture</code>s or calls back. Both patterns often appear in the same class, and both benefit from being tested with deterministic stand-ins — but the seams are different and the fakes look different.
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>threading / async dependency</strong> appears whenever code starts its own asynchronous work: <code>new Thread(r).start()</code>, <code>Executors.newSingleThreadExecutor().submit(task)</code>, <code>CompletableFuture.runAsync(r)</code>, <code>CompletableFuture.supplyAsync(supplier)</code>, any <code>@Async</code> method, any scheduled task. The class decides <em>where</em> and <em>when</em> the work runs, and tests inherit that decision.</p>
+
+<p>Common shapes: fire-and-forget background writes, parallel data enrichment, delayed retries, timeout-bounded calls, event publishing. All of them launch work the caller doesn't wait for — and tests, by default, either return before the async work finishes (and assert on stale state) or block on arbitrary sleeps (and become flaky).</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The test returns before the work does</h4>
+
+<p>Code like <code>CompletableFuture.runAsync(() -&gt; audit.record(entry))</code> schedules a task and returns immediately. A test that calls the enclosing method and then asserts on the audit log often sees an empty log — the task hasn't run yet. The audit actually lands a few milliseconds later, after the assertion has already failed.</p>
+
+<h4>Sleep-based synchronization is a lie</h4>
+
+<p>The common workaround — <code>Thread.sleep(100)</code> before the assertion — is wrong in both directions. On a fast machine, 100ms is overkill and wastes test-suite time. On a slow or loaded CI runner, 100ms isn't enough and the test fails intermittently. Neither outcome is a real signal.</p>
+
+<h4>Thread scheduling is non-deterministic</h4>
+
+<p>Two async tasks that complete in one order on your laptop can complete in the opposite order in CI. Tests that assume a particular completion sequence pass locally and fail on the shared runner, eroding team trust in the suite.</p>
+
+<h4>Error paths in async code are effectively untestable</h4>
+
+<p>Testing <em>"what happens when the async task throws"</em> requires both making it throw <em>and</em> waiting long enough for the throw to propagate through the <code>CompletionStage</code> chain. With a real executor and real timing, both halves are fragile.</p>
+
+<h4>Default executors are shared</h4>
+
+<p><code>CompletableFuture.runAsync(r)</code> without an explicit executor uses <code>ForkJoinPool.commonPool()</code>. Every test that touches such code shares that pool with every other test in the JVM, and with the test framework itself. Contention produces flakiness; one misbehaving test's leftover task can affect the next.</p>
+
+<hr>
+
+<h2>The technique: Inject an Executor</h2>
+
+<p><strong>Inject an Executor</strong> makes the class's async behavior a parameter instead of a hard-coded choice. The class takes an <code>Executor</code> (or <code>ExecutorService</code>, or <code>ScheduledExecutorService</code>, depending on the scope) through its constructor. Production wires in a real pool; tests wire in a <em>synchronous executor</em> — one that runs each submitted task on the caller's thread, immediately, before <code>execute</code> returns.</p>
+
+<p>With a synchronous test executor, async code becomes effectively sequential during tests: the submitting method waits (implicitly) for the task to complete, the test sees the effects, and every assertion is deterministic. Everywhere a <code>CompletableFuture</code> would have been pending, it's already complete.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A class spawns its own threads or submits to <code>ForkJoinPool.commonPool()</code> / similar default pools.</li>
+  <li>Tests need to assert on the effects of async work deterministically.</li>
+  <li>You can change the class's construction to accept an executor.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class's purpose <em>is</em> concurrency — a throttling rate-limiter, a parallel work-stealing scheduler. Tests should exercise real concurrency with real executors.</li>
+  <li>The async behavior is orthogonal to what you want to test — consider separating the async wrapper from the synchronous core and testing the core directly, with no executor at all.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>NotificationService</code> sends email asynchronously using the default pool:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">NotificationService</span> {
+    <span class="kw">private final</span> <span class="type">EmailSender</span> email;
+    <span class="kw">private final</span> <span class="type">AuditLog</span> audit;
+
+    <span class="kw">public</span> <span class="fn">NotificationService</span>(<span class="type">EmailSender</span> email, <span class="type">AuditLog</span> audit) {
+        <span class="kw">this</span>.email = email;
+        <span class="kw">this</span>.audit = audit;
+    }
+
+    <span class="kw">public</span> <span class="type">CompletableFuture</span>&lt;<span class="type">Void</span>&gt; <span class="fn">notify</span>(<span class="type">User</span> user, <span class="type">Event</span> event) {
+        <span class="kw">return</span> <span class="type">CompletableFuture</span>.runAsync(() -&gt; {
+            email.send(user.getEmail(), event.asMessage());
+            audit.record(<span class="str">"notified:"</span> + user.getId());
+        });
+    }
+}</code></pre>
+
+<p>A test calling <code>notify</code> and immediately checking the audit log races the async work. Adding <code>.get()</code> on the returned future helps, but only for the happy path — it won't make two concurrent notifications complete in a predictable order, and it introduces blocking into a test that was supposed to be fast.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the async primitive: explicit thread creation, <code>ExecutorService</code> submission, <code>CompletableFuture.runAsync</code>, <code>@Async</code> method.</li>
+  <li>Add an <code>Executor</code> constructor parameter. For simpler cases, <code>Executor</code> is enough; for scheduled work, take <code>ScheduledExecutorService</code>.</li>
+  <li>In the class body, pass the injected executor explicitly: <code>CompletableFuture.runAsync(task, executor)</code>, <code>executor.execute(runnable)</code>.</li>
+  <li>Provide a convenience no-arg constructor (or production wiring) that supplies the real pool.</li>
+  <li>In tests, pass a synchronous executor — either <code>Runnable::run</code> as an <code>Executor</code>, or a named implementation (<code>DirectExecutor</code> — see below).</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">NotificationService</span> {
+    <span class="kw">private final</span> <span class="type">EmailSender</span> email;
+    <span class="kw">private final</span> <span class="type">AuditLog</span> audit;
+    <span class="kw">private final</span> <span class="type">Executor</span> executor;
+
+    <span class="kw">public</span> <span class="fn">NotificationService</span>(<span class="type">EmailSender</span> email, <span class="type">AuditLog</span> audit, <span class="type">Executor</span> executor) {
+        <span class="kw">this</span>.email = email;
+        <span class="kw">this</span>.audit = audit;
+        <span class="kw">this</span>.executor = executor;
+    }
+
+    <span class="kw">public</span> <span class="type">CompletableFuture</span>&lt;<span class="type">Void</span>&gt; <span class="fn">notify</span>(<span class="type">User</span> user, <span class="type">Event</span> event) {
+        <span class="kw">return</span> <span class="type">CompletableFuture</span>.runAsync(() -&gt; {
+            email.send(user.getEmail(), event.asMessage());
+            audit.record(<span class="str">"notified:"</span> + user.getId());
+        }, executor);
+    }
+}
+
+<span class="cmt">// Minimal synchronous executor — runs tasks on the calling thread</span>
+<span class="kw">public class</span> <span class="type">DirectExecutor</span> <span class="kw">implements</span> <span class="type">Executor</span> {
+    <span class="ann">@Override</span>
+    <span class="kw">public void</span> <span class="fn">execute</span>(<span class="type">Runnable</span> r) { r.run(); }
+}
+
+<span class="cmt">// Test — async behavior becomes deterministic</span>
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">notifySendsEmailAndRecordsAudit</span>() <span class="kw">throws</span> <span class="type">Exception</span> {
+    <span class="type">FakeEmailSender</span> fakeEmail = <span class="kw">new</span> <span class="type">FakeEmailSender</span>();
+    <span class="type">FakeAuditLog</span> fakeAudit = <span class="kw">new</span> <span class="type">FakeAuditLog</span>();
+    <span class="type">Executor</span> sync = <span class="kw">new</span> <span class="type">DirectExecutor</span>();
+
+    <span class="type">NotificationService</span> svc = <span class="kw">new</span> <span class="type">NotificationService</span>(fakeEmail, fakeAudit, sync);
+    svc.notify(<span class="type">User</span>.withEmailAndId(<span class="str">"a@b.com"</span>, <span class="str">"u-1"</span>), <span class="type">Event</span>.sample()).get();
+
+    <span class="fn">assertEquals</span>(<span class="str">"a@b.com"</span>, fakeEmail.lastRecipient);
+    <span class="fn">assertEquals</span>(<span class="str">"notified:u-1"</span>, fakeAudit.lastEntry);
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">notifyPropagatesEmailFailures</span>() {
+    <span class="type">EmailSender</span> failing = (to, msg) -&gt; { <span class="kw">throw new</span> <span class="type">SmtpDownException</span>(); };
+    <span class="type">NotificationService</span> svc = <span class="kw">new</span> <span class="type">NotificationService</span>(failing, <span class="kw">new</span> <span class="type">FakeAuditLog</span>(), <span class="kw">new</span> <span class="type">DirectExecutor</span>());
+
+    <span class="type">CompletableFuture</span>&lt;<span class="type">Void</span>&gt; f = svc.notify(<span class="type">User</span>.sample(), <span class="type">Event</span>.sample());
+
+    <span class="fn">assertTrue</span>(f.isCompletedExceptionally());
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Separate the async wrapper from the synchronous core</h4>
+
+<p>Often the cleanest design is to put all the interesting logic in a method that runs synchronously and is tested without any executor, then have a thin async wrapper method that simply submits the sync method to the executor. The wrapper is trivial — one line — and barely needs testing. The core is 100% testable without touching concurrency. This mirrors the general advice <em>"keep concurrency at the edges"</em>.</p>
+
+<pre><code><span class="kw">public</span> <span class="type">CompletableFuture</span>&lt;<span class="type">Void</span>&gt; <span class="fn">notify</span>(<span class="type">User</span> u, <span class="type">Event</span> e) {
+    <span class="kw">return</span> <span class="type">CompletableFuture</span>.runAsync(() -&gt; notifySync(u, e), executor);
+}
+
+<span class="kw">void</span> <span class="fn">notifySync</span>(<span class="type">User</span> u, <span class="type">Event</span> e) {  <span class="cmt">// package-private for tests</span>
+    email.send(u.getEmail(), e.asMessage());
+    audit.record(<span class="str">"notified:"</span> + u.getId());
+}</code></pre>
+
+<h4>A deferred-execution test executor</h4>
+
+<p>When you need to test task ordering — <em>"task A should have submitted task B before completing"</em> — a synchronous executor isn't enough. Write a <code>DeferredExecutor</code> that queues tasks and only runs them when the test explicitly calls <code>runAll()</code>. This lets the test inspect the queue between runs.</p>
+
+<h4>Guava's MoreExecutors.directExecutor()</h4>
+
+<p>If your project already depends on Guava, skip the hand-written <code>DirectExecutor</code>: <code>MoreExecutors.directExecutor()</code> returns a canonical singleton. Small time saver; not a different technique.</p>
+
+<h4>Extract and Override Call</h4>
+
+<p>For a single async call site you'd rather not wire into the constructor, Feathers' <em>Extract and Override Call</em> works: wrap the <code>runAsync</code> in a protected method and override it in a test subclass to run the task synchronously.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Synchronous tests do not test concurrency</h4>
+
+<p>The synchronous executor makes async code deterministic, but it doesn't verify the code is correct under real concurrency. Race conditions, deadlocks, and memory-visibility bugs are invisible to a synchronous test. For genuine concurrency testing, different tools apply — jcstress for memory models, stress tests for races — and they complement, rather than replace, the deterministic unit tests.</p>
+
+<h4>Don't hold the executor yourself</h4>
+
+<p>The class under test should accept the executor, not construct it. An injected <code>Executor</code> is managed by whoever created the class — usually the composition root — and gets a consistent lifecycle. A class that constructs its own pool leaks threads on every instance.</p>
+
+<h4>Shutdown lifecycle matters</h4>
+
+<p>For <code>ExecutorService</code> (which has shutdown semantics), decide clearly who owns the lifecycle. If the class takes one, it shouldn't shut it down — that responsibility belongs to the code that created it. Otherwise tests that create a fresh executor per test and shut it down between tests start to interfere with long-lived production code when the patterns mix.</p>
+
+<h4>Spring's @Async</h4>
+
+<p>In Spring, <code>@Async</code>-annotated methods delegate to a <code>TaskExecutor</code> bean. Tests that want deterministic behavior either override that bean with a <code>SyncTaskExecutor</code> or (cleaner) call the underlying synchronous method directly, bypassing the Spring proxy. Either way, the principle is the same: make the executor a parameter of the system, not a fixed constant.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameterize Constructor</em> is the Ch 25 mechanism this page's technique instantiates. <em>Time / Clock Dependency → Inject a Clock</em> is the sibling problem for time-dependent scheduling — often combined with executor injection when testing scheduled / delayed tasks.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). This page covers a modern Java dependency type not named in Feathers' Chapter 25 catalog; the framing draws on Feathers' sensing/separation principle, but the specific technique is a post-2004 Java community convention.
+</footer>
+
+</body>
+</html>

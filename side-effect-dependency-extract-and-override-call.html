@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Side-Effect Dependency → Extract and Override Call</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Side-Effect Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Extract and Override Call</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Side-Effect Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract and Override Call</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>side-effect dependency</strong> exists inside a method: one or more specific lines do something you can't tolerate during a test — post to a remote service, write a file, send an email, touch a message queue, emit a metric to a monitoring system. The rest of the method is perfectly testable in principle; the problem is these individual call sites.</p>
+
+<p>This differs from a constructor or field dependency in that the offending behavior is narrowly localised. You don't need to inject a whole collaborator to fix it — you just need a seam around one call. That's exactly what <em>Extract and Override Call</em> provides.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>Running the method performs real side effects</h4>
+
+<p>A test that calls <code>logOrder(order)</code> expecting to verify the formatting logic will also, as a side effect, post a real audit entry to the live audit service. Even if the test doesn't assert on the posted entry, the entry still happens.</p>
+
+<h4>Side effects pollute shared environments</h4>
+
+<p>Writes to shared queues, files, or databases accumulate across test runs. Tests that ran in the past leave traces that affect tests running now. CI environments drift from developer machines because side effects have accumulated differently.</p>
+
+<h4>You can't verify the side effect without specialised infrastructure</h4>
+
+<p>To check <em>whether</em> a side effect occurred, you'd need to intercept it outside the process — run a real audit service in the test, read a real file back, consume from a real queue. Each of these is an entire integration-testing stack to cover a single line of code.</p>
+
+<h4>Error paths are untestable</h4>
+
+<p>The offending call may throw, retry, or block. Without a seam, you can't simulate <em>"the audit service is down"</em> or <em>"the file write fails"</em>. The error handling around the call is effectively uncovered.</p>
+
+<hr>
+
+<h2>The technique: Extract and Override Call</h2>
+
+<p><strong>Extract and Override Call</strong> isolates a problem call into its own method, then overrides that method in a test subclass. The offending line moves from the middle of a larger method into a one-line <code>protected</code> method whose only job is to make that call. A test subclass overrides the method to do nothing, record what was asked, or throw a simulated error.</p>
+
+<p>Feathers treats it as a precise, surgical technique: it neutralizes exactly one call site without reorganizing anything around it. The method under test remains otherwise unchanged. Only the targeted line is replaceable.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A method contains one or two specific calls whose side effects you can't run in tests.</li>
+  <li>The rest of the method is testable — the side-effect call is the sole obstacle.</li>
+  <li>The class isn't <code>final</code> and the method you want to override isn't <code>static</code> or <code>final</code>.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>Many side-effecting calls are scattered through the method — the whole method probably wants a different treatment (<em>Break Out Method Object</em> or splitting responsibilities).</li>
+  <li>The call is to a static method — use <em>Introduce Instance Delegator</em>, which is the static-specific variant of the same idea.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>AuditLogger.logOrder</code> formats and validates an entry, then posts it externally:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">AuditLogger</span> {
+    <span class="kw">public void</span> <span class="fn">logOrder</span>(<span class="type">Order</span> order) {
+        <span class="type">String</span> entry = formatEntry(order);
+        validateEntry(entry);
+        <span class="type">ExternalAuditService</span>.post(entry);  <span class="cmt">// live HTTP POST to an audit server</span>
+    }
+
+    <span class="kw">private</span> <span class="type">String</span> <span class="fn">formatEntry</span>(<span class="type">Order</span> o) { <span class="cmt">/* real formatting logic */</span> }
+    <span class="kw">private void</span> <span class="fn">validateEntry</span>(<span class="type">String</span> e) { <span class="cmt">/* real validation */</span> }
+}</code></pre>
+
+<p>The formatting and validation are exactly what you'd want to test. The HTTP POST is exactly what you'd want to stop from happening.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify the single call in the method that has the problematic side effect.</li>
+  <li>Extract it into a <code>protected</code> instance method whose body is just that call. Use <em>Preserve Signatures</em> — copy the argument list and return type verbatim.</li>
+  <li>Replace the original call with a call to the new method.</li>
+  <li>In tests, subclass the class and override the extracted method with a no-op, a recorder, or a fake that throws to simulate failure.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public class</span> <span class="type">AuditLogger</span> {
+    <span class="kw">public void</span> <span class="fn">logOrder</span>(<span class="type">Order</span> order) {
+        <span class="type">String</span> entry = formatEntry(order);
+        validateEntry(entry);
+        postToAuditService(entry);
+    }
+
+    <span class="kw">protected void</span> <span class="fn">postToAuditService</span>(<span class="type">String</span> entry) {
+        <span class="type">ExternalAuditService</span>.post(entry);
+    }
+
+    <span class="kw">private</span> <span class="type">String</span> <span class="fn">formatEntry</span>(<span class="type">Order</span> o) { <span class="cmt">/* unchanged */</span> }
+    <span class="kw">private void</span> <span class="fn">validateEntry</span>(<span class="type">String</span> e) { <span class="cmt">/* unchanged */</span> }
+}
+
+<span class="cmt">// Test subclass that records instead of posting</span>
+<span class="kw">class</span> <span class="type">RecordingAuditLogger</span> <span class="kw">extends</span> <span class="type">AuditLogger</span> {
+    <span class="kw">public</span> <span class="type">String</span> lastPosted;
+
+    <span class="ann">@Override</span>
+    <span class="kw">protected void</span> <span class="fn">postToAuditService</span>(<span class="type">String</span> entry) {
+        lastPosted = entry;
+    }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">logOrderFormatsAndValidatesBeforePosting</span>() {
+    <span class="type">RecordingAuditLogger</span> logger = <span class="kw">new</span> <span class="type">RecordingAuditLogger</span>();
+    logger.logOrder(<span class="type">Order</span>.of(<span class="type">Money</span>.usd(<span class="num">49.99</span>), <span class="str">"cust-123"</span>));
+
+    <span class="fn">assertNotNull</span>(logger.lastPosted);
+    <span class="fn">assertTrue</span>(logger.lastPosted.contains(<span class="str">"cust-123"</span>));
+    <span class="fn">assertTrue</span>(logger.lastPosted.startsWith(<span class="str">"ORDER:"</span>));
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">logOrderPropagatesPostFailures</span>() {
+    <span class="type">AuditLogger</span> logger = <span class="kw">new</span> <span class="type">AuditLogger</span>() {
+        <span class="ann">@Override</span>
+        <span class="kw">protected void</span> <span class="fn">postToAuditService</span>(<span class="type">String</span> entry) {
+            <span class="kw">throw new</span> <span class="type">AuditDownException</span>();
+        }
+    };
+    <span class="fn">assertThrows</span>(<span class="type">AuditDownException</span>.<span class="kw">class</span>, () -&gt; logger.logOrder(<span class="type">Order</span>.sample()));
+}</code></pre>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Subclass and Override Method</h4>
+
+<p>If the offending call is the bulk of the method — most of the logic <em>is</em> the side effect — extracting it into its own method produces a one-liner next to a method with nothing interesting in it. In that case, override the whole method in the test subclass instead. Extract and Override Call is for the case where the method has meaningful logic around the side effect; Subclass and Override Method is for the case where the side effect <em>is</em> the method.</p>
+
+<p class="before-after">Before — method that does little but the side effect:</p>
+
+<pre><code><span class="kw">public void</span> <span class="fn">notify</span>(<span class="type">User</span> user, <span class="type">Event</span> event) {
+    <span class="type">EmailService</span>.send(user.getEmail(), event.asMessage());
+}</code></pre>
+
+<p class="before-after">After — override the whole method:</p>
+
+<pre><code><span class="kw">public void</span> <span class="fn">notify</span>(<span class="type">User</span> user, <span class="type">Event</span> event) {
+    <span class="type">EmailService</span>.send(user.getEmail(), event.asMessage());
+}
+<span class="cmt">// no extraction needed — the method itself is the seam</span>
+
+<span class="kw">class</span> <span class="type">TestNotifier</span> <span class="kw">extends</span> <span class="type">Notifier</span> {
+    <span class="kw">public</span> <span class="type">User</span> lastNotified;
+    <span class="ann">@Override</span>
+    <span class="kw">public void</span> <span class="fn">notify</span>(<span class="type">User</span> user, <span class="type">Event</span> event) { lastNotified = user; }
+}</code></pre>
+
+<h4>Break Out Method Object</h4>
+
+<p>When the method in question is so large and tangled that extracting just one call isn't safe — or when many side-effecting calls are woven through the method — the heavier technique is to promote the entire method into its own class. Locals become fields; each side-effecting call becomes a protected method on the new class, each of which can be overridden independently. See the pairing page for <em>Monster-method dependency</em> for the full treatment.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Don't move any logic into the extracted method</h4>
+
+<p>The discipline is strict: the extracted method contains <em>only</em> the problem call. Any pre-processing of arguments, any post-processing of return values, stays in the original method. If you move logic into the extracted method, you lose test coverage of that logic in the subclass.</p>
+
+<h4>Watch for multiple side effects in one line</h4>
+
+<p>A call like <code>ExternalAuditService.post(entry).onFailure(retry)</code> does two things that want to be substitutable separately. Either split the call first, or extract the entire expression and override as a unit (losing some granularity).</p>
+
+<h4>Anonymous subclasses are fine for one-off tests</h4>
+
+<p>If you only need the override for one test, an anonymous subclass at the test site is perfectly readable and avoids creating a separate named class for every variation. For reused test doubles, a named subclass is clearer.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Introduce Instance Delegator</em> is the variant used when the side-effecting call is a <em>static</em> method (like <code>ExternalAuditService.post</code> in the example above). The two techniques are close cousins; the choice depends on whether the target of the call is an instance or a class.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

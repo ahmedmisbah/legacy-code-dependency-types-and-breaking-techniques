@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Large-Class Dependency → Push Down Dependency</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Large-Class Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Push Down Dependency</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Large-Class Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Push Down Dependency</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>large-class dependency</strong> isn't a single bad field or a single bad call — it's the cumulative weight of many. The class has become so big and so entangled that every individual dependency-breaking technique, applied on its own, doesn't move the needle. Parameterize Constructor fixes one field, but the class has twelve. Extract and Override Call fixes one side effect, but the class has dozens. Extract Interface on each collaborator produces a wall of interfaces no one wants to maintain.</p>
+
+<p>Feathers' answer isn't "break everything one at a time." It's to make the class itself testable in two versions: a production version that wires in all the heavy real dependencies, and a test-friendly version that doesn't. <em>Push Down Dependency</em> is the mechanical move that separates the two.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The class can't be constructed without its ecosystem</h4>
+
+<p>A class with a database client, an LDAP connection, a mail sender, a message queue, a metrics emitter, a cache, and a job scheduler all as direct collaborators needs every one of them to exist before it will instantiate. Setting up tests means setting up production.</p>
+
+<h4>Fixing one dependency at a time doesn't help enough</h4>
+
+<p>If you apply Parameterize Constructor to one field, the constructor now takes twelve parameters instead of eleven — and you still can't test anything because the other eleven are still real. Incremental dependency breaking only helps when you're most of the way done.</p>
+
+<h4>Subclassing to override methods doesn't scale</h4>
+
+<p>Extract and Override Getter, Extract and Override Call, and their relatives each add one seam per problem. On a class with dozens of problems, the result is a test subclass overriding thirty methods — unreadable, fragile, and still brittle.</p>
+
+<h4>The class mixes concerns at multiple levels</h4>
+
+<p>Often the large class has genuine business logic (worth testing) intertwined with infrastructure wiring (not worth testing in unit tests). You want the logic without the wiring. Splitting them by hand is a large refactor; pushing the wiring down one level is a smaller, safer move that enables the same tests.</p>
+
+<hr>
+
+<h2>The technique: Push Down Dependency</h2>
+
+<p><strong>Push Down Dependency</strong> keeps the original class's interface intact but makes it abstract. A new concrete subclass (conventionally named for the production environment: <code>Production&lt;X&gt;</code>, <code>Real&lt;X&gt;</code>) takes ownership of the problematic dependencies — the fields, their construction, and any methods that touch them. The abstract base class keeps the business logic; the subclass holds the infrastructure glue.</p>
+
+<p>Tests run against a different subclass — typically a hand-written test double that provides trivial implementations of the abstract methods (returning canned values, recording calls). The abstract base class gets exercised through both subclasses, but only the test subclass is ever instantiated during unit tests.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A class has many problematic dependencies, not just one or two.</li>
+  <li>The business logic can be articulated in terms of a handful of abstract operations (<code>findUser</code>, <code>sendNotification</code>, <code>recordAudit</code>) even if each operation currently involves a real collaborator.</li>
+  <li>You're willing to create a subclass and route production instantiation through it.</li>
+  <li>You can't easily split the class into several smaller classes (that's the better long-term fix, but often much more work).</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>Only one or two dependencies are causing trouble — address them individually.</li>
+  <li>The class can be safely split into smaller, focused classes — do that instead. Push Down Dependency creates inheritance depth, which has its own costs.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>UserAccountManager</code> has a database, an LDAP client, and a mail service all wired into it directly:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">UserAccountManager</span> {
+    <span class="kw">private final</span> <span class="type">DatabaseClient</span> db;
+    <span class="kw">private final</span> <span class="type">LdapClient</span> ldap;
+    <span class="kw">private final</span> <span class="type">MailService</span> mail;
+    <span class="kw">private final</span> <span class="type">AuditLog</span> audit;
+
+    <span class="kw">public</span> <span class="fn">UserAccountManager</span>() {
+        <span class="kw">this</span>.db = <span class="kw">new</span> <span class="type">DatabaseClient</span>(<span class="type">Config</span>.dbUrl());
+        <span class="kw">this</span>.ldap = <span class="kw">new</span> <span class="type">LdapClient</span>(<span class="type">Config</span>.ldapUrl());
+        <span class="kw">this</span>.mail = <span class="kw">new</span> <span class="type">SmtpMailService</span>();
+        <span class="kw">this</span>.audit = <span class="kw">new</span> <span class="type">AuditLog</span>();
+    }
+
+    <span class="kw">public</span> <span class="type">AccountResult</span> <span class="fn">provision</span>(<span class="type">String</span> username, <span class="type">String</span> email) {
+        <span class="kw">if</span> (db.findUser(username) != <span class="kw">null</span>) <span class="kw">return</span> <span class="type">AccountResult</span>.exists();
+        <span class="kw">if</span> (!ldap.hasRole(username, <span class="str">"eligible"</span>)) <span class="kw">return</span> <span class="type">AccountResult</span>.denied();
+
+        <span class="type">User</span> user = db.createUser(username, email);
+        mail.send(email, <span class="str">"Welcome, "</span> + username);
+        audit.record(<span class="str">"provisioned:"</span> + username);
+        <span class="kw">return</span> <span class="type">AccountResult</span>.ok(user);
+    }
+}</code></pre>
+
+<p>There's actual business logic in <code>provision</code> — the uniqueness check, the eligibility rule, the sequence of steps. But exercising it means constructing a <code>DatabaseClient</code>, <code>LdapClient</code>, <code>SmtpMailService</code>, and <code>AuditLog</code>. Each has its own dependencies. The test setup is bigger than the production code.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>Identify which operations in the class are "infrastructure wrappers" — a call to <code>db.findUser</code>, a call to <code>mail.send</code>, etc. Each will become an abstract method.</li>
+  <li>Declare the original class <code>abstract</code> and replace each infrastructure call with a call to a new abstract method of similar name.</li>
+  <li>Remove the problematic fields from the base class. The base now knows nothing about <code>DatabaseClient</code> or <code>LdapClient</code> directly.</li>
+  <li>Create a concrete subclass named for production (<code>ProductionUserAccountManager</code>). It holds the problematic fields, constructs them, and implements each abstract method by delegating to the real collaborator.</li>
+  <li>Update production instantiation sites to use the new subclass name.</li>
+  <li>In tests, subclass the base class with a test-only subclass whose abstract method implementations return canned data and record calls.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="kw">public abstract class</span> <span class="type">UserAccountManager</span> {
+
+    <span class="kw">public</span> <span class="type">AccountResult</span> <span class="fn">provision</span>(<span class="type">String</span> username, <span class="type">String</span> email) {
+        <span class="kw">if</span> (findUser(username) != <span class="kw">null</span>) <span class="kw">return</span> <span class="type">AccountResult</span>.exists();
+        <span class="kw">if</span> (!hasEligibleRole(username)) <span class="kw">return</span> <span class="type">AccountResult</span>.denied();
+
+        <span class="type">User</span> user = createUser(username, email);
+        sendWelcome(email, username);
+        recordAudit(<span class="str">"provisioned:"</span> + username);
+        <span class="kw">return</span> <span class="type">AccountResult</span>.ok(user);
+    }
+
+    <span class="kw">protected abstract</span> <span class="type">User</span> <span class="fn">findUser</span>(<span class="type">String</span> username);
+    <span class="kw">protected abstract boolean</span> <span class="fn">hasEligibleRole</span>(<span class="type">String</span> username);
+    <span class="kw">protected abstract</span> <span class="type">User</span> <span class="fn">createUser</span>(<span class="type">String</span> username, <span class="type">String</span> email);
+    <span class="kw">protected abstract void</span> <span class="fn">sendWelcome</span>(<span class="type">String</span> email, <span class="type">String</span> username);
+    <span class="kw">protected abstract void</span> <span class="fn">recordAudit</span>(<span class="type">String</span> entry);
+}
+
+<span class="cmt">// Production wiring — infrastructure lives here, not in the base class</span>
+<span class="kw">public class</span> <span class="type">ProductionUserAccountManager</span> <span class="kw">extends</span> <span class="type">UserAccountManager</span> {
+    <span class="kw">private final</span> <span class="type">DatabaseClient</span> db = <span class="kw">new</span> <span class="type">DatabaseClient</span>(<span class="type">Config</span>.dbUrl());
+    <span class="kw">private final</span> <span class="type">LdapClient</span> ldap = <span class="kw">new</span> <span class="type">LdapClient</span>(<span class="type">Config</span>.ldapUrl());
+    <span class="kw">private final</span> <span class="type">MailService</span> mail = <span class="kw">new</span> <span class="type">SmtpMailService</span>();
+    <span class="kw">private final</span> <span class="type">AuditLog</span> audit = <span class="kw">new</span> <span class="type">AuditLog</span>();
+
+    <span class="ann">@Override</span> <span class="kw">protected</span> <span class="type">User</span> <span class="fn">findUser</span>(<span class="type">String</span> u) { <span class="kw">return</span> db.findUser(u); }
+    <span class="ann">@Override</span> <span class="kw">protected boolean</span> <span class="fn">hasEligibleRole</span>(<span class="type">String</span> u) { <span class="kw">return</span> ldap.hasRole(u, <span class="str">"eligible"</span>); }
+    <span class="ann">@Override</span> <span class="kw">protected</span> <span class="type">User</span> <span class="fn">createUser</span>(<span class="type">String</span> u, <span class="type">String</span> e) { <span class="kw">return</span> db.createUser(u, e); }
+    <span class="ann">@Override</span> <span class="kw">protected void</span> <span class="fn">sendWelcome</span>(<span class="type">String</span> e, <span class="type">String</span> u) { mail.send(e, <span class="str">"Welcome, "</span> + u); }
+    <span class="ann">@Override</span> <span class="kw">protected void</span> <span class="fn">recordAudit</span>(<span class="type">String</span> entry) { audit.record(entry); }
+}
+
+<span class="cmt">// Test subclass — no infrastructure at all</span>
+<span class="kw">class</span> <span class="type">TestUserAccountManager</span> <span class="kw">extends</span> <span class="type">UserAccountManager</span> {
+    <span class="kw">public</span> <span class="type">User</span> existingUser = <span class="kw">null</span>;
+    <span class="kw">public boolean</span> eligible = <span class="kw">true</span>;
+    <span class="kw">public</span> <span class="type">String</span> lastWelcomeTo;
+    <span class="kw">public</span> <span class="type">String</span> lastAudit;
+
+    <span class="ann">@Override</span> <span class="kw">protected</span> <span class="type">User</span> <span class="fn">findUser</span>(<span class="type">String</span> u) { <span class="kw">return</span> existingUser; }
+    <span class="ann">@Override</span> <span class="kw">protected boolean</span> <span class="fn">hasEligibleRole</span>(<span class="type">String</span> u) { <span class="kw">return</span> eligible; }
+    <span class="ann">@Override</span> <span class="kw">protected</span> <span class="type">User</span> <span class="fn">createUser</span>(<span class="type">String</span> u, <span class="type">String</span> e) { <span class="kw">return new</span> <span class="type">User</span>(u, e); }
+    <span class="ann">@Override</span> <span class="kw">protected void</span> <span class="fn">sendWelcome</span>(<span class="type">String</span> e, <span class="type">String</span> u) { lastWelcomeTo = e; }
+    <span class="ann">@Override</span> <span class="kw">protected void</span> <span class="fn">recordAudit</span>(<span class="type">String</span> entry) { lastAudit = entry; }
+}
+
+<span class="ann">@Test</span>
+<span class="kw">public void</span> <span class="fn">rejectsProvisioningWhenUserAlreadyExists</span>() {
+    <span class="type">TestUserAccountManager</span> mgr = <span class="kw">new</span> <span class="type">TestUserAccountManager</span>();
+    mgr.existingUser = <span class="kw">new</span> <span class="type">User</span>(<span class="str">"alice"</span>, <span class="str">"a@b.com"</span>);
+
+    <span class="type">AccountResult</span> r = mgr.provision(<span class="str">"alice"</span>, <span class="str">"a@b.com"</span>);
+
+    <span class="fn">assertTrue</span>(r.isExists());
+    <span class="fn">assertNull</span>(mgr.lastWelcomeTo);
+    <span class="fn">assertNull</span>(mgr.lastAudit);
+}</code></pre>
+
+<p>The business logic of <code>provision</code> — uniqueness check, eligibility gate, sequence of side effects — is now fully testable with no infrastructure. The <em>logic</em> lives in the abstract base class; the <em>glue</em> lives in the production subclass.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract Interface (on each collaborator)</h4>
+
+<p>An alternative path: instead of pushing infrastructure down into a subclass, extract an interface from each infrastructure collaborator and inject all of them through the constructor. This produces a class with many constructor parameters but flat inheritance. Good when you want a future DI container to wire things up; bad when the parameter list grows to twelve. Push Down Dependency trades parameter count for inheritance depth.</p>
+
+<h4>Break Out Method Object</h4>
+
+<p>If part of the class is a giant method with its own entanglement problem, promote that method to its own class first. Sometimes a "large class" is really "one reasonable class plus one monster method" — splitting them reveals the real structure. See the pairing page for <em>Monster-method dependency</em>.</p>
+
+<h4>Pull Up Feature</h4>
+
+<p>The mirror operation: move a testable piece <em>up</em> into a new abstract parent class, leaving the untestable pieces in the now-subclass. Feathers describes it for situations where the pure-logic methods are a minority surrounded by infrastructure — you pull the minority up into a superclass whose tests can ignore the infrastructure subclass entirely.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>Preserve the public interface</h4>
+
+<p>Callers of the original class shouldn't need to change. Keep the public methods on the abstract base class; keep their signatures identical. The subclass name is new, but the type callers depend on — through a base class reference or a factory — remains the one they knew.</p>
+
+<h4>Don't push down too eagerly</h4>
+
+<p>Not every field wants to move. Fields that are pure values (configuration flags, data structures, immutable lookup tables) belong in the base class. Only the <em>problematic</em> collaborators — the ones blocking tests — get pushed down.</p>
+
+<h4>Inheritance isn't free</h4>
+
+<p>You're adding a layer of inheritance that future developers have to understand. Document why: "ProductionUserAccountManager owns infrastructure wiring so that UserAccountManager can be unit-tested via TestUserAccountManager." A one-sentence comment at the top of the subclass saves future confusion.</p>
+
+<h4>Migrate toward composition eventually</h4>
+
+<p>Push Down Dependency is a legacy technique — it works on existing code without major restructuring. The cleaner end-state is usually composition: a <code>UserAccountManager</code> class that takes a <code>UserRepository</code>, <code>EligibilityService</code>, and <code>Notifier</code> as constructor parameters, each of which is a separately-designed interface. Once tests cover the logic, the refactor from inheritance to composition is safe and mechanical.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> <em>Parameterize Constructor</em> is the right move when only one or two dependencies are problematic. <em>Subclass and Override Method</em> uses a similar inheritance trick for a much smaller scope — a single method, not whole categories of collaborators.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>

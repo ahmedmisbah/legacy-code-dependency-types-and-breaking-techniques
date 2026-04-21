@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Build-Time Dependency → Extract Interface</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="logo-header">
+  <img src="logo.jpg" alt="Tek Caffe Logo">
+</div>
+
+<a href="index.html" class="back-link">← Back to all Pairings</a>
+
+<h1>Build-Time Dependency</h1>
+<p class="aka"><strong>Java dependency type</strong> &middot; <strong>Chapter 25 fix:</strong> Extract Interface</p>
+
+<div class="pairing">
+  <div class="box">
+    <div class="label-small">The dependency</div>
+    <div class="value">Build-Time Dependency</div>
+  </div>
+  <div class="box">
+    <div class="label-small">The technique</div>
+    <div class="value">Extract Interface</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>The dependency</h2>
+
+<p>A <strong>build-time dependency</strong> is the kind that doesn't prevent a test from passing — it prevents the test cycle from being fast enough to run often. Clients depend on a concrete class that changes frequently. Every time the class's source is edited, the compiler treats every client that imports it as potentially out of date. Incremental builds recompile large swaths of the codebase; CI builds recompile even more. The feedback loop from "save file" to "test result" stretches from seconds into minutes.</p>
+
+<p>This is the one Feathers dependency type where the problem isn't testability in isolation — it's testability in practice. A test suite that runs in two seconds gets run after every change; a test suite that requires a three-minute build gets run rarely, and the tests it contains stop being useful.</p>
+
+<hr>
+
+<h2>Why this blocks tests</h2>
+
+<h4>The build is now a bottleneck</h4>
+
+<p>Tests are only useful if they're run often. If the build must complete before any test runs, and the build is slow because a core concrete class has many dependents, tests that pass in milliseconds still appear to take minutes. Developers start running them less often.</p>
+
+<h4>Changes ripple through the dependency graph</h4>
+
+<p>In Java, a client that <code>imports com.example.OrderService</code> is compiled against the binary signature of <code>OrderService</code>. Changing private internals shouldn't trigger recompilation of clients — and often doesn't, thanks to incremental build tools — but changing public methods, adding fields referenced from initializers, or modifying the class hierarchy does. Clients compile even when they didn't need to.</p>
+
+<h4>Mocking is harder than it should be</h4>
+
+<p>If clients depend on a concrete class, test doubles for that class have to subclass it — which means they inherit the class's real constructor cost, its fields, and potentially its side effects. An interface-based dependency lets the test double start from zero.</p>
+
+<h4>Coupling hides from the compiler</h4>
+
+<p>A concrete dependency couples callers to the shape of the implementation: the constructor signature, the full set of public methods, sometimes even the package layout. The compiler can't help you decouple those — the whole concrete surface is part of the contract. An interface makes the contract explicit.</p>
+
+<div class="note">
+<strong>A different motivation, the same technique.</strong> <em>Extract Interface</em> is usually sold as a testability move — it breaks runtime dependencies. For build-time dependencies, the motivation shifts to compile-time speed, but the mechanics are identical. The interface is a stable compile-time contract, and implementation changes no longer force downstream recompilation.
+</div>
+
+<hr>
+
+<h2>The technique: Extract Interface</h2>
+
+<p><strong>Extract Interface</strong> creates a new interface declaring the methods that clients use on the concrete class. Clients are updated to depend on the interface. The concrete class is declared to implement the interface. Production continues to use the concrete implementation; the difference is that clients are now compiled against the interface, and changes to the implementation no longer invalidate client compilation units.</p>
+
+<p>For this application, the goal is to make the interface as stable as possible — precisely because instability in the interface is exactly what you're trying to avoid. The interface captures <em>what</em> the class does; the implementation keeps <em>how</em>. Only changes to the <em>what</em> cause client recompilation.</p>
+
+<hr>
+
+<h2>When to use it</h2>
+
+<ul class="steps">
+  <li>A concrete class has many dependents and changes frequently.</li>
+  <li>Build time — incremental or full — has become a bottleneck for the team's development cycle.</li>
+  <li>You control the class and can add an interface without coordinating across teams.</li>
+</ul>
+
+<p>When <em>not</em> to use it:</p>
+
+<ul class="steps">
+  <li>The class is stable and rarely changes — extraction adds ceremony for no gain.</li>
+  <li>The class has few dependents — the recompilation cost is already bounded.</li>
+  <li>The interface would have to change nearly as often as the class — you haven't separated the <em>what</em> from the <em>how</em>.</li>
+</ul>
+
+<hr>
+
+<h2>Example</h2>
+
+<p class="before-after">Before — <code>PricingEngine</code> is imported directly by many client classes:</p>
+
+<pre><code><span class="kw">public class</span> <span class="type">PricingEngine</span> {
+    <span class="kw">private final</span> <span class="type">PriceCache</span> cache = <span class="kw">new</span> <span class="type">PriceCache</span>();
+    <span class="kw">private</span> <span class="type">DiscountStrategy</span> strategy;
+
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order, <span class="type">Customer</span> c) { <span class="cmt">/* ... */</span> }
+    <span class="kw">public</span> <span class="type">Money</span> <span class="fn">lineItemPrice</span>(<span class="type">LineItem</span> item) { <span class="cmt">/* ... */</span> }
+    <span class="kw">public void</span> <span class="fn">setStrategy</span>(<span class="type">DiscountStrategy</span> s) { <span class="kw">this</span>.strategy = s; }
+}
+
+<span class="cmt">// Dozens of clients</span>
+<span class="kw">public class</span> <span class="type">CheckoutController</span> {
+    <span class="kw">private final</span> <span class="type">PricingEngine</span> pricing; <span class="cmt">// concrete dependency</span>
+    <span class="cmt">// ...</span>
+}
+<span class="kw">public class</span> <span class="type">CartRenderer</span> {
+    <span class="kw">private final</span> <span class="type">PricingEngine</span> pricing; <span class="cmt">// concrete dependency</span>
+    <span class="cmt">// ...</span>
+}
+<span class="kw">public class</span> <span class="type">BatchInvoicer</span> {
+    <span class="kw">private final</span> <span class="type">PricingEngine</span> pricing; <span class="cmt">// concrete dependency</span>
+    <span class="cmt">// ...</span>
+}</code></pre>
+
+<p>When <code>PricingEngine</code> is edited — new private field, new helper method, a change to <code>lineItemPrice</code>'s internals — every client's compilation unit may be invalidated. In a large project, that's minutes of build time per change.</p>
+
+<hr>
+
+<h2>Steps</h2>
+
+<ol class="steps">
+  <li>List the methods clients actually call on the concrete class. In most cases this is a subset of its public methods — utility methods used only internally stay off the interface.</li>
+  <li>Create an interface with those methods. Name it for the role (<code>Pricing</code>, <code>PriceSource</code>) rather than for the class (<code>IPricingEngine</code>).</li>
+  <li>Declare the concrete class to implement the interface. No body changes needed — the class already has the methods.</li>
+  <li>Update each client to declare its dependency as the interface type, not the concrete class type. This is a mechanical change — replace <code>PricingEngine</code> with <code>Pricing</code> in field declarations, parameters, and local variables.</li>
+  <li>At composition roots (factory methods, constructors called from <code>main</code>, DI configuration), keep the concrete class — that's where the real implementation is created.</li>
+</ol>
+
+<hr>
+
+<h2>Example (after)</h2>
+
+<pre><code><span class="cmt">// The stable contract</span>
+<span class="kw">public interface</span> <span class="type">Pricing</span> {
+    <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order, <span class="type">Customer</span> c);
+    <span class="type">Money</span> <span class="fn">lineItemPrice</span>(<span class="type">LineItem</span> item);
+}
+
+<span class="cmt">// The implementation — free to change without triggering client recompilation</span>
+<span class="kw">public class</span> <span class="type">PricingEngine</span> <span class="kw">implements</span> <span class="type">Pricing</span> {
+    <span class="kw">private final</span> <span class="type">PriceCache</span> cache = <span class="kw">new</span> <span class="type">PriceCache</span>();
+    <span class="kw">private</span> <span class="type">DiscountStrategy</span> strategy;
+
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">Money</span> <span class="fn">finalPrice</span>(<span class="type">Order</span> order, <span class="type">Customer</span> c) { <span class="cmt">/* ... */</span> }
+    <span class="ann">@Override</span> <span class="kw">public</span> <span class="type">Money</span> <span class="fn">lineItemPrice</span>(<span class="type">LineItem</span> item) { <span class="cmt">/* ... */</span> }
+    <span class="kw">public void</span> <span class="fn">setStrategy</span>(<span class="type">DiscountStrategy</span> s) { <span class="kw">this</span>.strategy = s; }
+}
+
+<span class="cmt">// Clients now depend on the interface</span>
+<span class="kw">public class</span> <span class="type">CheckoutController</span> {
+    <span class="kw">private final</span> <span class="type">Pricing</span> pricing;
+    <span class="kw">public</span> <span class="fn">CheckoutController</span>(<span class="type">Pricing</span> pricing) { <span class="kw">this</span>.pricing = pricing; }
+    <span class="cmt">// ...</span>
+}
+
+<span class="cmt">// Composition root creates the concrete implementation once</span>
+<span class="kw">public class</span> <span class="type">AppBootstrap</span> {
+    <span class="kw">public static void</span> <span class="fn">main</span>(<span class="type">String</span>[] args) {
+        <span class="type">Pricing</span> pricing = <span class="kw">new</span> <span class="type">PricingEngine</span>();
+        <span class="kw">new</span> <span class="type">CheckoutController</span>(pricing).start();
+    }
+}</code></pre>
+
+<p>Now when <code>PricingEngine</code> gains a new private helper, adjusts cache sizing, or restructures <code>finalPrice</code>'s internals, the <code>Pricing</code> interface is unchanged and none of the clients need recompilation. Only the composition root and the engine itself compile.</p>
+
+<hr>
+
+<h2>Supporting and alternative techniques</h2>
+
+<h4>Extract Implementer</h4>
+
+<p>A C++ technique with less relevance in Java but worth noting. Where Extract Interface adds a new type above the existing class, <em>Extract Implementer</em> renames the existing class to <code>XImpl</code> and turns the original name into the interface. The effect is similar, but clients that referenced the original class name don't have to change. In Java, modern refactoring tools make Extract Interface equally painless either way, so Extract Implementer is rarely the right call.</p>
+
+<h4>Package boundaries</h4>
+
+<p>Not a Chapter 25 technique, but a close relative that can compound the benefit. Put the interface in a stable package (say, <code>com.example.pricing.api</code>) and the implementation in a volatile one (<code>com.example.pricing.impl</code>). Build systems can use this separation to short-circuit recompilation of dependents when only <code>.impl</code> files changed. Combined with Extract Interface, it's the standard way large Java codebases keep build times manageable.</p>
+
+<h4>Module boundaries (JPMS or build modules)</h4>
+
+<p>At the extreme, split the interface and implementation into separate build modules (Gradle subprojects, Maven modules, or JPMS modules). Clients depend on the interface module; the implementation module depends on the interface module and provides the binding. Build tools recompile only modules whose inputs changed, so edits inside the implementation module don't trigger any recompilation in client modules. This is overkill for small codebases but pays off quickly once the project has a dozen teams and a hundred modules.</p>
+
+<hr>
+
+<h2>Cautions and variations</h2>
+
+<h4>The interface must be stable</h4>
+
+<p>If the interface changes every time the implementation does, you've added ceremony without solving the problem. Design the interface around durable concepts: <em>what does this type do?</em> rather than <em>how does this type do it?</em>. Private helpers, caches, strategies — none of those belong on the interface.</p>
+
+<h4>Minimal surface</h4>
+
+<p>Include only the methods clients actually use. A class with fifteen public methods might need only six on the interface. The narrower the interface, the less often it needs to change, and the easier it is to reason about.</p>
+
+<h4>Don't extract before you need to</h4>
+
+<p>Premature interface extraction adds noise. Wait until the class has multiple clients and the pain of rebuilds is concrete. Feathers' <em>"extract when it helps"</em> applies here too.</p>
+
+<h4>Dependency Inversion as a byproduct</h4>
+
+<p>After this refactor, high-level modules (clients) depend on an abstraction (the interface) rather than a low-level module (the concrete implementation). That's the Dependency Inversion Principle — and Extract Interface is one of the most direct ways to achieve it on an existing codebase. The build-time benefit and the design benefit arrive together.</p>
+
+<div class="note">
+<strong>Related techniques not covered here.</strong> For runtime testability of a single parameter, see <em>Parameter dependency → Extract Interface</em> — same technique, different motivation. For cases where you can't modify the class (framework / third-party types), <em>Adapt Parameter</em> applies instead.
+</div>
+
+<footer>
+  <img src="logo.jpg" alt="Tek Caffe Logo"><br>
+  Content adapted from <em>Working Effectively with Legacy Code</em> by Michael C. Feathers (Prentice Hall, 2004). Dependency-type descriptions, technique guidance, and code examples are original; the technique names and overall catalog are Feathers'.
+</footer>
+
+</body>
+</html>
