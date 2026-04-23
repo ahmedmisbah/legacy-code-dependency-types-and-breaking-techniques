@@ -223,3 +223,28 @@ footer .version {
   color: #5a6488;
   font-size: 0.75rem;
 }
+
+footer .footer-icons {
+  display: flex;
+  justify-content: center;
+  gap: 1.1rem;
+  margin: 0.4rem 0 1rem;
+}
+
+footer .footer-icons a {
+  color: #7880a0;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+
+footer .footer-icons a:hover {
+  color: #6b9fff;
+  text-decoration: none;
+}
+
+footer .footer-icons svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
